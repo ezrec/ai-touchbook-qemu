@@ -445,6 +445,11 @@ _syscall3(int,sys_mkdirat,int,dirfd,const char *,pathname,mode_t,mode)
 _syscall4(int,sys_mknodat,int,dirfd,const char *,pathname,
           mode_t,mode,dev_t,dev)
 #endif
+#if (defined(TARGET_NR_newfstatat) || defined(TARGET_NR_fstatat64) ) && \
+        defined(__NR_newfstatat)
+_syscall4(int,sys_newfstatat,int,dirfd,const char *,pathname,
+          struct stat *,buf,int,flags)
+#endif
 #if defined(TARGET_NR_openat) && defined(__NR_openat)
 _syscall4(int,sys_openat,int,dirfd,const char *,pathname,int,flags,mode_t,mode)
 #endif
@@ -3473,6 +3478,7 @@ typedef struct {
     pthread_cond_t cond;
     pthread_t thread;
     uint32_t tid;
+    unsigned int flags;
     abi_ulong child_tidptr;
     abi_ulong parent_tidptr;
     sigset_t sigmask;

@@ -2458,7 +2458,7 @@ void init_task_state(TaskState *ts)
  
 int main(int argc, char **argv, char **envp)
 {
-    const char *filename;
+    char *filename = NULL;
     const char *cpu_model;
     struct target_pt_regs regs1, *regs = &regs1;
     struct image_info info1, *info = &info1;
@@ -2471,8 +2471,10 @@ int main(int argc, char **argv, char **envp)
     char **target_environ, **wrk;
     char **target_argv;
     int target_argc;
+    int drop_ld_preload = 0;
     envlist_t *envlist = NULL;
     const char *argv0 = NULL;
+    int argskip = 0;
     int i;
     int ret;
 
@@ -2534,6 +2536,8 @@ int main(int argc, char **argv, char **envp)
         } else if (!strcmp(r, "0")) {
             r = argv[optind++];
             argv0 = r;
+        } else if (!strcmp(r,"-sbox-call")) {
+            argskip++;
         } else if (!strcmp(r, "s")) {
             if (optind >= argc)
                 break;
@@ -2577,7 +2581,9 @@ int main(int argc, char **argv, char **envp)
            have_guest_base = 1;
 #endif
         } else if (!strcmp(r, "drop-ld-preload")) {
-            (void) envlist_unsetenv(envlist, "LD_PRELOAD");
+            drop_ld_preload = 1;
+        } else if (!strcmp(r, "keep-ld-preload")) {
+            drop_ld_preload = 0;
         } else if (!strcmp(r, "singlestep")) {
             singlestep = 1;
         } else if (!strcmp(r, "strace")) {
@@ -2589,8 +2595,15 @@ int main(int argc, char **argv, char **envp)
     }
     if (optind >= argc)
         usage();
-    filename = argv[optind];
-    exec_path = argv[optind];
+    if (filename == NULL) {
+        filename = argv[optind];
+        exec_path = argv[optind];
+    } else {
+        argv0 = argv[optind];
+    }
+    if (drop_ld_preload) {
+        (void) envlist_unsetenv(envlist, "LD_PRELOAD");
+    }
 
     /* Zero out regs */
     memset(regs, 0, sizeof(struct target_pt_regs));
@@ -2713,7 +2726,7 @@ int main(int argc, char **argv, char **envp)
     env->opaque = ts;
     task_settid(ts);
 
-    ret = loader_exec(filename, target_argv, target_environ, regs,
+    ret = loader_exec(filename, target_argv+argskip, target_environ, regs,
         info, &bprm);
     if (ret != 0) {
         printf("Error %d while loading %s\n", ret, filename);
