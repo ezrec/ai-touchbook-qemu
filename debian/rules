@@ -1,0 +1,164 @@
+#!/usr/bin/make -f
+#
+# $Id: rules 366 2008-12-23 16:19:26Z aurel32 $
+#
+
+# Support multiple makes at once
+ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+NJOBS := -j $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+endif
+unexport CFLAGS
+unexport LDFLAGS
+
+# Architecture/system specific configuration
+DEB_HOST_ARCH_OS = $(shell dpkg-architecture -qDEB_HOST_ARCH_OS)
+DEB_HOST_ARCH_CPU = $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
+
+SHELL = /bin/bash
+
+
+TARGET_SYSTEM_TCG    = arm-softmmu i386-softmmu
+TARGET_LINUX_TCG     = arm-linux-user i386-linux-user
+package_list         = obj-sb2/config-host.mak obj-system/config-host.mak
+install_list         = sb2-qemu-install sb-system-qemu-install
+sb1_prefix           = /scratchbox/devkits/qemu
+
+target_system_list = $(TARGET_SYSTEM_TCG)
+
+source_version = $(shell dpkg-parsechangelog | grep ^Version | head -n1 | cut -d ' ' -f 2)
+
+ifeq ($(DEB_HOST_ARCH_OS),linux)
+       conf_arch += --audio-drv-list=sdl
+       target_linux_list += $(TARGET_LINUX_TCG)
+endif
+ifeq ($(DEB_HOST_ARCH_OS),kfreebsd)
+       conf_arch += --audio-drv-list=oss,sdl,esd,pa
+endif
+
+BUILD_SB1_QEMU=$(shell test -r /scratchbox/tools/lib/libsb.a && echo YES || echo NO)
+
+ifeq ($(DEB_HOST_ARCH_CPU),i386)
+       conf_arch += --cpu=i386
+ifeq ($(BUILD_SB1_QEMU),YES)
+       package_list += obj-sb1/config-host.mak
+       install_list += sb1-qemu-install
+       sb1_target_list += arm-linux-user ppc-linux-user sparc-linux-user i386-linux-user armeb-linux-user mips-linux-user mipsel-linux-user
+else
+       nopackages += -Nscratchbox-devkit-qemu
+endif
+endif
+ifeq ($(DEB_HOST_ARCH_CPU),sparc)
+       conf_arch += --cpu=sparc
+endif
+
+qemu_docs = \
+	qemu-doc.html \
+	qemu-tech.html \
+	qemu.1 \
+	qemu-img.1
+
+obj-sb2/config-host.mak: configure
+	dh_testdir
+	mkdir obj-sb2
+	( cd obj-sb2; ../configure \
+		--prefix=/usr \
+		--interp-prefix=/ \
+		--disable-blobs \
+		--enable-guest-base \
+		--target-list="$(target_linux_list)" \
+		$(conf_arch) )
+	( cd obj-sb2; $(MAKE) $(NJOBS) )
+
+obj-sb1/config-host.mak: configure
+	dh_testdir
+	mkdir obj-sb1
+	( cd obj-sb1; ../configure \
+		--prefix=$(sb1_prefix) \
+		--interp-prefix=/ \
+		--static \
+		--disable-werror\
+		--enable-guest-base \
+		--target-list="$(sb1_target_list)"\
+		--disable-sdl )
+	( cd obj-sb1; $(MAKE) $(NJOBS) )
+
+obj-system/config-host.mak: configure
+	dh_testdir
+	mkdir obj-system
+	( cd obj-system; ../configure \
+		--prefix=/usr \
+		--interp-prefix=/ \
+		--disable-blobs \
+		--enable-guest-base \
+		--target-list="$(target_system_list)" \
+		$(conf_arch) )
+	( cd obj-system; $(MAKE) $(NJOBS) )
+
+build: $(package_list)
+
+clean:
+	dh_testdir
+	dh_testroot
+	[ ! -f config-host.mak ] || $(MAKE) distclean
+	rm -rf obj-sb1 obj-sb2 obj-system
+	rm -f $(qemu_docs)
+	dh_clean
+
+# cputransp-methods should be generated at postinst
+sb1-qemu-install:
+	mkdir -p debian/scratchbox-devkit-qemu/$(sb1_prefix)/{bin,etc}
+	cp debian/cputransp-methods \
+		debian/scratchbox-devkit-qemu/$(sb1_prefix)/etc
+	for i in obj-sb1/*-linux-user/qemu-* ; do \
+		install -m 755 $$i debian/scratchbox-devkit-qemu/$(sb1_prefix)/bin/`basename $$i`-sb ; \
+	done
+
+sb2-qemu-install:
+	mkdir -p debian/sb2-qemu-arm/usr/bin
+	cp obj-sb2/arm-linux-user/qemu-arm debian/sb2-qemu-arm/usr/bin/sb2-qemu-arm
+	cp obj-sb2/i386-linux-user/qemu-i386  debian/sb2-qemu-arm/usr/bin/sb2-qemu-i386
+
+sb-system-qemu-install:
+	mkdir -p debian/sb-system-qemu/usr/bin
+	cp obj-system/arm-softmmu/qemu-system-arm  debian/sb-system-qemu/usr/bin/sb-qemu-system-arm
+	cp obj-system/i386-softmmu/qemu  debian/sb-system-qemu/usr/bin/sb-qemu-system-i386
+
+install: build $(install_list)
+	dh_testdir
+	dh_testroot
+#	dh_clean -k
+	dh_installdirs -a
+
+binary-indep:
+# Nothing to do.
+
+binary-arch: install
+	dh_testdir
+	dh_testroot
+#	dh_install -a
+#	dh_installdebconf -a
+	dh_installdocs -s $(nopackages)
+	dh_installexamples -s $(nopackages)
+#	dh_installlogrotate -a $(nopackages)
+	dh_installman -s $(nopackages)
+	dh_installinfo -s $(nopackages)
+	dh_installchangelogs -s Changelog $(nopackages)
+	dh_link -s $(nopackages)
+	dh_strip -s $(nopackages)
+	dh_compress -s $(nopackages)
+	dh_fixperms -s $(nopackages)
+	dh_installdeb -s $(nopackages)
+	dh_shlibdeps -s $(nopackages)
+	dh_gencontrol -s $(nopackages)
+	dh_md5sums -s $(nopackages)
+	dh_builddeb -s $(nopackages)
+
+binary: binary-indep binary-arch
+
+sb1-qemu-tarball: build sb1-qemu-install
+	tar czf ../scratchbox-devkit-qemu-$(source_version).tar.gz \
+		-C debian/scratchbox-devkit-qemu \
+		$(shell ls -1 debian/scratchbox-devkit-qemu)
+
+.PHONY: build clean binary-indep binary-arch binary install
+
