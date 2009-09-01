@@ -228,25 +228,6 @@ static void tsc2005_write(TSC2005State *s, int reg, uint16_t data)
 static void tsc2005_pin_update(TSC2005State *s)
 {
     int64_t expires;
-    int pin_state;
-
-    switch (s->pin_func) {
-    case 0:
-        pin_state = !s->pressure && !!s->dav;
-        break;
-    case 1:
-    case 3:
-    default:
-        pin_state = !s->dav;
-        break;
-    case 2:
-        pin_state = !s->pressure;
-    }
-
-    if (pin_state != s->irq) {
-        s->irq = pin_state;
-        qemu_set_irq(s->pint, s->irq);
-    }
 
     switch (s->nextfunction) {
     case TSC_MODE_XYZ_SCAN:
@@ -398,6 +379,7 @@ uint32_t tsc2005_txrx(void *opaque, uint32_t value, int len)
 
 static void tsc2005_timer_tick(void *opaque)
 {
+	int pin_state;
     TSC2005State *s = opaque;
 
     /* Timer ticked -- a set of conversions has been finished.  */
@@ -405,10 +387,28 @@ static void tsc2005_timer_tick(void *opaque)
     if (!s->busy)
         return;
 
-    s->busy = 0;
-    s->dav |= mode_regs[s->function];
-    s->function = -1;
-    tsc2005_pin_update(s);
+	switch (s->pin_func) {
+		case 0:
+			pin_state = !s->pressure && !!s->dav;
+			break;
+		case 1:
+		case 3:
+		default:
+			pin_state = !s->dav;
+			break;
+		case 2:
+			pin_state = !s->pressure;
+    }
+	
+	s->busy = 0;
+	if (pin_state && !s->irq) s->dav |= mode_regs[s->function];
+	s->function = -1;
+	tsc2005_pin_update(s);
+
+    if (pin_state != s->irq) {
+        s->irq = pin_state;
+        qemu_set_irq(s->pint, s->irq);
+    }
 }
 
 static void tsc2005_touchscreen_event(void *opaque,
