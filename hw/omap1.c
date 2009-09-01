@@ -95,6 +95,7 @@ struct omap_intr_handler_s {
     qemu_irq parent_intr[2];
     unsigned char nbanks;
     int level_only;
+    uint8_t revision;
 
     /* state */
     uint32_t new_agr[2];
@@ -406,6 +407,63 @@ void omap_inth_reset(struct omap_intr_handler_s *s)
     qemu_set_irq(s->parent_intr[1], 0);
 }
 
+static void omap_inth_save_state(QEMUFile *f, void *opaque)
+{
+    struct omap_intr_handler_s *s = (struct omap_intr_handler_s *)opaque;
+    int i, j;
+    
+    qemu_put_be32(f, s->new_agr[0]);
+    qemu_put_be32(f, s->new_agr[1]);
+    qemu_put_sbe32(f, s->sir_intr[0]);
+    qemu_put_sbe32(f, s->sir_intr[1]);
+    qemu_put_sbe32(f, s->autoidle);
+    qemu_put_be32(f, s->mask);
+    qemu_put_byte(f, s->nbanks);
+    for (i = 0; i < s->nbanks; i++) {
+        qemu_put_be32(f, s->bank[i].irqs);
+        qemu_put_be32(f, s->bank[i].inputs);
+        qemu_put_be32(f, s->bank[i].mask);
+        qemu_put_be32(f, s->bank[i].fiq);
+        qemu_put_be32(f, s->bank[i].sens_edge);
+        qemu_put_be32(f, s->bank[i].swi);
+        for (j = 0; j < 32; j++)
+            qemu_put_byte(f, s->bank[i].priority[j]);
+    }
+}
+
+static int omap_inth_load_state(QEMUFile *f, void *opaque, int version_id)
+{
+    struct omap_intr_handler_s *s = (struct omap_intr_handler_s *)opaque;
+    int i, j;
+    
+    if (version_id)
+        return -EINVAL;
+    
+    s->new_agr[0] = qemu_get_be32(f);
+    s->new_agr[1] = qemu_get_be32(f);
+    s->sir_intr[0] = qemu_get_sbe32(f);
+    s->sir_intr[1] = qemu_get_sbe32(f);
+    s->autoidle = qemu_get_sbe32(f);
+    s->mask = qemu_get_be32(f);
+    if (qemu_get_byte(f) != s->nbanks)
+        return -EINVAL;
+    for (i = 0; i < s->nbanks; i++) {
+        s->bank[i].irqs = qemu_get_be32(f);
+        s->bank[i].inputs = qemu_get_be32(f);
+        s->bank[i].mask = qemu_get_be32(f);
+        s->bank[i].fiq = qemu_get_be32(f);
+        s->bank[i].sens_edge = qemu_get_be32(f);
+        s->bank[i].swi = qemu_get_be32(f);
+        for (j = 0; j < 32; j++)
+            s->bank[i].priority[j] = qemu_get_byte(f);
+    }
+    
+    omap_inth_update(s, 0);
+    omap_inth_update(s, 1);
+    
+    return 0;
+}
+
 struct omap_intr_handler_s *omap_inth_init(target_phys_addr_t base,
                 unsigned long size, unsigned char nbanks, qemu_irq **pins,
                 qemu_irq parent_irq, qemu_irq parent_fiq, omap_clk clk)
@@ -428,6 +486,8 @@ struct omap_intr_handler_s *omap_inth_init(target_phys_addr_t base,
                     omap_inth_writefn, s);
     cpu_register_physical_memory(base, size, iomemtype);
 
+    register_savevm("omap_inth", -1, 0,
+                    omap_inth_save_state, omap_inth_load_state, s);
     return s;
 }
 
@@ -448,7 +508,7 @@ static uint32_t omap2_inth_read(void *opaque, target_phys_addr_t addr)
 
     switch (offset) {
     case 0x00:	/* INTC_REVISION */
-        return 0x21;
+        return s->revision;
 
     case 0x10:	/* INTC_SYSCONFIG */
         return (s->autoidle >> 2) & 1;
@@ -624,7 +684,9 @@ static CPUWriteMemoryFunc * const omap2_inth_writefn[] = {
     omap2_inth_write,
 };
 
-struct omap_intr_handler_s *omap2_inth_init(target_phys_addr_t base,
+struct omap_intr_handler_s *omap2_inth_init(
+                struct omap_mpu_state_s *mpu,
+                target_phys_addr_t base,
                 int size, int nbanks, qemu_irq **pins,
                 qemu_irq parent_irq, qemu_irq parent_fiq,
                 omap_clk fclk, omap_clk iclk)
@@ -634,6 +696,7 @@ struct omap_intr_handler_s *omap2_inth_init(target_phys_addr_t base,
             qemu_mallocz(sizeof(struct omap_intr_handler_s) +
                             sizeof(struct omap_intr_handler_bank_s) * nbanks);
 
+    s->revision = cpu_class_omap3(mpu) ? 0x40 : 0x21;
     s->parent_intr[0] = parent_irq;
     s->parent_intr[1] = parent_fiq;
     s->nbanks = nbanks;
@@ -648,6 +711,8 @@ struct omap_intr_handler_s *omap2_inth_init(target_phys_addr_t base,
                     omap2_inth_writefn, s);
     cpu_register_physical_memory(base, size, iomemtype);
 
+    register_savevm("omap_inth", -1, 0,
+                    omap_inth_save_state, omap_inth_load_state, s);
     return s;
 }
 
@@ -1967,6 +2032,39 @@ struct omap_uart_s {
     uint8_t clksel;
 };
 
+static void omap_uart_save_state(QEMUFile *f, void *opaque)
+{
+    struct omap_uart_s *s = (struct omap_uart_s *)opaque;
+    
+    qemu_put_byte(f, s->eblr);
+    qemu_put_byte(f, s->syscontrol);
+    qemu_put_byte(f, s->wkup);
+    qemu_put_byte(f, s->cfps);
+    qemu_put_byte(f, s->mdr[0]);
+    qemu_put_byte(f, s->mdr[1]);
+    qemu_put_byte(f, s->scr);
+    qemu_put_byte(f, s->clksel);
+}
+
+static int omap_uart_load_state(QEMUFile *f, void *opaque, int version_id)
+{
+    struct omap_uart_s *s = (struct omap_uart_s *)opaque;
+    
+    if (version_id)
+        return -EINVAL;
+    
+    s->eblr = qemu_get_byte(f);
+    s->syscontrol = qemu_get_byte(f);
+    s->wkup = qemu_get_byte(f);
+    s->cfps = qemu_get_byte(f);
+    s->mdr[0] = qemu_get_byte(f);
+    s->mdr[1] = qemu_get_byte(f);
+    s->scr = qemu_get_byte(f);
+    s->clksel = qemu_get_byte(f);
+    
+    return  0;
+}
+
 void omap_uart_reset(struct omap_uart_s *s)
 {
     s->eblr = 0x00;
@@ -1989,6 +2087,8 @@ struct omap_uart_s *omap_uart_init(target_phys_addr_t base,
     s->serial = serial_mm_init(base, 2, irq, omap_clk_getrate(fclk)/16,
                                chr ?: qemu_chr_open("null", "null", NULL), 1);
 
+    register_savevm("omap_uart", base >> 8, 0,
+                    omap_uart_save_state, omap_uart_load_state, s);
     return s;
 }
 
@@ -2101,9 +2201,12 @@ struct omap_uart_s *omap2_uart_init(struct omap_target_agent_s *ta,
 void omap_uart_attach(struct omap_uart_s *s, CharDriverState *chr)
 {
     /* TODO: Should reuse or destroy current s->serial */
+    fprintf(stderr, "%s: WARNING - this function is broken, avoid using it\n",
+            __FUNCTION__);
     s->serial = serial_mm_init(s->base, 2, s->irq,
-                    omap_clk_getrate(s->fclk) / 16,
-                    chr ?: qemu_chr_open("null", "null", NULL), 1);
+                               omap_clk_getrate(s->fclk) / 16,
+                               chr ?: qemu_chr_open("null", "null", NULL),
+                               1);
 }
 
 /* MPU Clock/Reset/Power Mode Control */

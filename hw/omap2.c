@@ -80,6 +80,12 @@ struct omap_gp_timer_s {
 #define GPT_OVF_IT	(1 << 1)
 #define GPT_MAT_IT	(1 << 0)
 
+/*if the clock source of gptimer changes, rate must be regenerated*/
+void omap_gp_timer_change_clk(struct omap_gp_timer_s *timer)
+{
+    timer->rate = omap_clk_getrate(timer->clk);
+}
+
 static inline void omap_gp_timer_intr(struct omap_gp_timer_s *timer, int it)
 {
     if (timer->it_ena & it) {
@@ -105,11 +111,18 @@ static inline void omap_gp_timer_out(struct omap_gp_timer_s *timer, int level)
 
 static inline uint32_t omap_gp_timer_read(struct omap_gp_timer_s *timer)
 {
-    uint64_t distance;
+    uint64_t distance, rate;
 
     if (timer->st && timer->rate) {
         distance = qemu_get_clock(vm_clock) - timer->time;
-        distance = muldiv64(distance, timer->rate, timer->ticks_per_sec);
+        
+        /*if ticks_per_sec is bigger than 32bit we cannot use muldiv64*/
+        if (timer->ticks_per_sec > 0xffffffff) {
+            distance /= ticks_per_sec / 1000; /*distance ms*/
+            rate = timer->rate >> (timer->pre ? timer->ptv + 1 : 0);
+            distance = muldiv64(distance, rate, 1000);
+        } else
+            distance = muldiv64(distance, timer->rate, timer->ticks_per_sec);
 
         if (distance >= 0xffffffff - timer->val)
             return 0xffffffff;
@@ -129,15 +142,23 @@ static inline void omap_gp_timer_sync(struct omap_gp_timer_s *timer)
 
 static inline void omap_gp_timer_update(struct omap_gp_timer_s *timer)
 {
-    int64_t expires, matches;
+    int64_t expires, matches, rate;
 
     if (timer->st && timer->rate) {
-        expires = muldiv64(0x100000000ll - timer->val,
+        if (timer->ticks_per_sec > 0xffffffff) {
+            rate = timer->rate >> (timer->pre ? timer->ptv + 1 : 0); /*1s -> rate ticks*/
+            expires = muldiv64(0x100000000ll - timer->val, ticks_per_sec, rate);
+        } else
+            expires = muldiv64(0x100000000ll - timer->val,
                         timer->ticks_per_sec, timer->rate);
         qemu_mod_timer(timer->timer, timer->time + expires);
 
         if (timer->ce && timer->match_val >= timer->val) {
-            matches = muldiv64(timer->match_val - timer->val,
+            if (timer->ticks_per_sec > 0xffffffff) {
+                rate = timer->rate >> (timer->pre ? timer->ptv + 1 : 0); /*1s -> rate ticks*/
+                matches = muldiv64(timer->match_val - timer->val, ticks_per_sec, rate);
+            } else
+                matches = muldiv64(timer->match_val - timer->val,
                             timer->ticks_per_sec, timer->rate);
             qemu_mod_timer(timer->match, timer->time + matches);
         } else
@@ -234,6 +255,7 @@ static void omap_gp_timer_clk_setup(struct omap_gp_timer_s *timer)
     omap_clk_adduser(timer->clk,
                     qemu_allocate_irqs(omap_gp_timer_clk_update, timer, 1)[0]);
     timer->rate = omap_clk_getrate(timer->clk);
+    //fprintf(stderr, "omap gptimer clk rate 0x%llx\n", timer->rate);
 }
 
 static void omap_gp_timer_reset(struct omap_gp_timer_s *s)
@@ -466,6 +488,89 @@ static CPUWriteMemoryFunc * const omap_gp_timer_writefn[] = {
     omap_gp_timer_write,
 };
 
+static void omap_gp_timer_save_state(QEMUFile *f, void *opaque)
+{
+    struct omap_gp_timer_s *s = (struct omap_gp_timer_s *)opaque;
+    
+    qemu_put_timer(f, s->timer);
+    qemu_put_timer(f, s->match);
+    qemu_put_sbe32(f, s->in_val);
+    qemu_put_sbe32(f, s->out_val);
+    qemu_put_sbe64(f, s->time);
+    qemu_put_sbe64(f, s->rate);
+    qemu_put_sbe64(f, s->ticks_per_sec);
+    qemu_put_sbe16(f, s->config);
+    qemu_put_sbe32(f, s->status);
+    qemu_put_sbe32(f, s->it_ena);
+    qemu_put_sbe32(f, s->wu_ena);
+    qemu_put_sbe32(f, s->enable);
+    qemu_put_sbe32(f, s->inout);
+    qemu_put_sbe32(f, s->capt2);
+    qemu_put_sbe32(f, s->pt);
+    qemu_put_sbe32(f, s->trigger);
+    qemu_put_sbe32(f, s->capture);
+    qemu_put_sbe32(f, s->scpwm);
+    qemu_put_sbe32(f, s->ce);
+    qemu_put_sbe32(f, s->pre);
+    qemu_put_sbe32(f, s->ptv);
+    qemu_put_sbe32(f, s->ar);
+    qemu_put_sbe32(f, s->st);
+    qemu_put_sbe32(f, s->posted);
+    qemu_put_be32(f, s->val);
+    qemu_put_be32(f, s->load_val);
+    qemu_put_be32(f, s->capture_val[0]);
+    qemu_put_be32(f, s->capture_val[1]);
+    qemu_put_be32(f, s->match_val);
+    qemu_put_sbe32(f, s->capt_num);
+    qemu_put_be16(f, s->writeh);
+    qemu_put_be16(f, s->readh);
+}
+
+static int omap_gp_timer_load_state(QEMUFile *f, void *opaque, int version_id)
+{
+    struct omap_gp_timer_s *s = (struct omap_gp_timer_s *)opaque;
+    
+    if (version_id)
+        return -EINVAL;
+    
+    qemu_get_timer(f, s->timer);
+    qemu_get_timer(f, s->match);
+    s->in_val = qemu_get_sbe32(f);
+    s->out_val = qemu_get_sbe32(f);
+    s->time = qemu_get_sbe64(f);
+    s->rate = qemu_get_sbe64(f);
+    s->ticks_per_sec = qemu_get_sbe64(f);
+    s->config = qemu_get_sbe16(f);
+    s->status = qemu_get_sbe32(f);
+    s->it_ena = qemu_get_sbe32(f);
+    s->wu_ena = qemu_get_sbe32(f);
+    s->enable = qemu_get_sbe32(f);
+    s->inout = qemu_get_sbe32(f);
+    s->capt2 = qemu_get_sbe32(f);
+    s->pt = qemu_get_sbe32(f);
+    s->trigger = qemu_get_sbe32(f);
+    s->capture = qemu_get_sbe32(f);
+    s->scpwm = qemu_get_sbe32(f);
+    s->ce = qemu_get_sbe32(f);
+    s->pre = qemu_get_sbe32(f);
+    s->ptv = qemu_get_sbe32(f);
+    s->ar = qemu_get_sbe32(f);
+    s->st = qemu_get_sbe32(f);
+    s->posted = qemu_get_sbe32(f);
+    s->val = qemu_get_be32(f);
+    s->load_val = qemu_get_be32(f);
+    s->capture_val[0] = qemu_get_be32(f);
+    s->capture_val[1] = qemu_get_be32(f);
+    s->match_val = qemu_get_be32(f);
+    s->capt_num = qemu_get_sbe32(f);
+    s->writeh = qemu_get_be16(f);
+    s->readh = qemu_get_be16(f);
+    
+    omap_gp_timer_update(s);
+    
+    return 0;
+}
+
 struct omap_gp_timer_s *omap_gp_timer_init(struct omap_target_agent_s *ta,
                 qemu_irq irq, omap_clk fclk, omap_clk iclk)
 {
@@ -486,6 +591,8 @@ struct omap_gp_timer_s *omap_gp_timer_init(struct omap_target_agent_s *ta,
                     omap_gp_timer_writefn, s);
     omap_l4_attach(ta, 0, iomemtype);
 
+    register_savevm("omap_gp_timer", (ta->base >> 12) & 0xfffff, 0,
+                    omap_gp_timer_save_state, omap_gp_timer_load_state, s);
     return s;
 }
 
@@ -502,17 +609,24 @@ static void omap_synctimer_reset(struct omap_synctimer_s *s)
 static uint32_t omap_synctimer_readw(void *opaque, target_phys_addr_t addr)
 {
     struct omap_synctimer_s *s = (struct omap_synctimer_s *) opaque;
-
+    
     switch (addr) {
     case 0x00:	/* 32KSYNCNT_REV */
         return 0x21;
-
     case 0x10:	/* CR */
         return omap_synctimer_read(s) - s->val;
     }
 
     OMAP_BAD_REG(addr);
     return 0;
+}
+
+static uint32_t omap3_synctimer_readw(void *opaque, target_phys_addr_t addr)
+{
+    struct omap_synctimer_s *s = (struct omap_synctimer_s *)opaque;
+    return (addr == 0x04) 
+        ? s->sysconfig 
+        : omap_synctimer_readw(opaque, addr);
 }
 
 static uint32_t omap_synctimer_readh(void *opaque, target_phys_addr_t addr)
@@ -522,11 +636,23 @@ static uint32_t omap_synctimer_readh(void *opaque, target_phys_addr_t addr)
 
     if (addr & 2)
         return s->readh;
-    else {
-        ret = omap_synctimer_readw(opaque, addr);
-        s->readh = ret >> 16;
-        return ret & 0xffff;
-    }
+
+    ret = omap_synctimer_readw(opaque, addr);
+    s->readh = ret >> 16;
+    return ret & 0xffff;
+}
+
+static uint32_t omap3_synctimer_readh(void *opaque, target_phys_addr_t addr)
+{
+    struct omap_synctimer_s *s = (struct omap_synctimer_s *) opaque;
+    uint32_t ret;
+    
+    if (addr & 2)
+        return s->readh;
+    
+    ret = omap3_synctimer_readw(opaque, addr);
+    s->readh = ret >> 16;
+    return ret & 0xffff;
 }
 
 static CPUReadMemoryFunc * const omap_synctimer_readfn[] = {
@@ -535,10 +661,26 @@ static CPUReadMemoryFunc * const omap_synctimer_readfn[] = {
     omap_synctimer_readw,
 };
 
+static CPUReadMemoryFunc * const omap3_synctimer_readfn[] = {
+    omap_badwidth_read32,
+    omap3_synctimer_readh,
+    omap3_synctimer_readw,
+};
+
 static void omap_synctimer_write(void *opaque, target_phys_addr_t addr,
                 uint32_t value)
 {
     OMAP_BAD_REG(addr);
+}
+
+static void omap3_synctimer_write(void *opaque, target_phys_addr_t addr,
+                uint32_t value)
+{
+    struct omap_synctimer_s *s = (struct omap_synctimer_s *)opaque;
+    if (addr == 0x04) /* SYSCONFIG */
+        s->sysconfig = value & 0x0c;
+    else
+        OMAP_BAD_REG(addr);
 }
 
 static CPUWriteMemoryFunc * const omap_synctimer_writefn[] = {
@@ -547,14 +689,54 @@ static CPUWriteMemoryFunc * const omap_synctimer_writefn[] = {
     omap_synctimer_write,
 };
 
+static CPUWriteMemoryFunc * const omap3_synctimer_writefn[] = {
+    omap_badwidth_write32,
+    omap3_synctimer_write,
+    omap3_synctimer_write,
+};
+
+static void omap_synctimer_save_state(QEMUFile *f, void *opaque)
+{
+    struct omap_synctimer_s *s = (struct omap_synctimer_s *)opaque;
+
+    qemu_put_be32(f, s->val);
+    qemu_put_be16(f, s->readh);
+    qemu_put_be32(f, s->sysconfig);
+}
+
+static int omap_synctimer_load_state(QEMUFile *f, void *opaque, int version_id)
+{
+    struct omap_synctimer_s *s = (struct omap_synctimer_s *)opaque;
+
+    if (version_id)
+      return -EINVAL;
+
+    s->val = qemu_get_be32(f);
+    s->readh = qemu_get_be16(f);
+    s->sysconfig = qemu_get_be32(f);
+
+    omap_synctimer_reset(s);
+
+    return 0;
+}
+
 void omap_synctimer_init(struct omap_target_agent_s *ta,
                 struct omap_mpu_state_s *mpu, omap_clk fclk, omap_clk iclk)
 {
     struct omap_synctimer_s *s = &mpu->synctimer;
 
     omap_synctimer_reset(s);
-    omap_l4_attach(ta, 0, l4_register_io_memory(
-                      omap_synctimer_readfn, omap_synctimer_writefn, s));
+    if (cpu_class_omap3(mpu))
+        omap_l4_attach(ta, 0, l4_register_io_memory(omap3_synctimer_readfn,
+                                                    omap3_synctimer_writefn,
+                                                    s));
+    else
+        omap_l4_attach(ta, 0, l4_register_io_memory(omap_synctimer_readfn,
+                                                    omap_synctimer_writefn,
+                                                    s));
+
+    register_savevm("omap_synctimer", -1, 0,
+                    omap_synctimer_save_state, omap_synctimer_load_state, s);
 }
 
 /* General-Purpose Interface of OMAP2 */
@@ -564,6 +746,7 @@ struct omap2_gpio_s {
     qemu_irq *in;
     qemu_irq handler[32];
 
+    uint8_t revision;
     uint8_t config[2];
     uint32_t inputs;
     uint32_t outputs;
@@ -664,7 +847,7 @@ static uint32_t omap_gpio_module_read(void *opaque, target_phys_addr_t addr)
 
     switch (addr) {
     case 0x00:	/* GPIO_REVISION */
-        return 0x18;
+        return s->revision;
 
     case 0x10:	/* GPIO_SYSCONFIG */
         return s->config[0];
@@ -741,7 +924,8 @@ static void omap_gpio_module_write(void *opaque, target_phys_addr_t addr,
     case 0x00:	/* GPIO_REVISION */
     case 0x14:	/* GPIO_SYSSTATUS */
     case 0x38:	/* GPIO_DATAIN */
-        OMAP_RO_REG(addr);
+        /* read-only, ignore quietly */
+        //OMAP_RO_REGV(addr, value);
         break;
 
     case 0x10:	/* GPIO_SYSCONFIG */
@@ -867,7 +1051,7 @@ static void omap_gpio_module_write(void *opaque, target_phys_addr_t addr,
         break;
 
     default:
-        OMAP_BAD_REG(addr);
+        OMAP_BAD_REGV(addr, value);
         return;
     }
 }
@@ -939,16 +1123,18 @@ static CPUWriteMemoryFunc * const omap_gpio_module_writefn[] = {
     omap_gpio_module_write,
 };
 
-static void omap_gpio_module_init(struct omap2_gpio_s *s,
+static void omap_gpio_module_init(struct omap_mpu_state_s *mpu,
+                struct omap2_gpio_s *s,
                 struct omap_target_agent_s *ta, int region,
-                qemu_irq mpu, qemu_irq dsp, qemu_irq wkup,
+                qemu_irq mpu_irq, qemu_irq dsp_irq, qemu_irq wkup_irq,
                 omap_clk fclk, omap_clk iclk)
 {
     int iomemtype;
 
-    s->irq[0] = mpu;
-    s->irq[1] = dsp;
-    s->wkup = wkup;
+    s->revision = cpu_class_omap3(mpu) ? 0x25 : 0x18;
+    s->irq[0] = mpu_irq;
+    s->irq[1] = dsp_irq;
+    s->wkup = wkup_irq;
     s->in = qemu_allocate_irqs(omap_gpio_module_set, s, 32);
 
     iomemtype = l4_register_io_memory(omap_gpio_module_readfn,
@@ -957,12 +1143,71 @@ static void omap_gpio_module_init(struct omap2_gpio_s *s,
 }
 
 struct omap_gpif_s {
-    struct omap2_gpio_s module[5];
+    struct omap2_gpio_s module[6];
     int modules;
 
     int autoidle;
     int gpo;
 };
+
+static void omap_gpif_save_state(QEMUFile *f, void *opaque)
+{
+    struct omap_gpif_s *s = (struct omap_gpif_s *)opaque;
+    int i, j;
+    
+    qemu_put_sbe32(f, s->autoidle);
+    qemu_put_sbe32(f, s->gpo);
+    qemu_put_sbe32(f, s->modules);
+    for (i = 0; i < s->modules; i++) {
+        for (j = 0; j < 2; j++) {
+            qemu_put_byte(f, s->module[i].config[j]);
+            qemu_put_be32(f, s->module[i].level[j]);
+            qemu_put_be32(f, s->module[i].edge[j]);
+            qemu_put_be32(f, s->module[i].mask[j]);
+            qemu_put_be32(f, s->module[i].ints[j]);
+        }
+        qemu_put_be32(f, s->module[i].inputs);
+        qemu_put_be32(f, s->module[i].outputs);
+        qemu_put_be32(f, s->module[i].dir);
+        qemu_put_be32(f, s->module[i].wumask);
+        qemu_put_be32(f, s->module[i].debounce);
+        qemu_put_byte(f, s->module[i].delay);
+    }
+}
+
+static int omap_gpif_load_state(QEMUFile *f, void *opaque, int version_id)
+{
+    struct omap_gpif_s *s = (struct omap_gpif_s *)opaque;
+    int i, j;
+
+    if (version_id)
+        return -EINVAL;
+    
+    s->autoidle = qemu_get_sbe32(f);
+    s->gpo = qemu_get_sbe32(f);
+    if (qemu_get_sbe32(f) != s->modules)
+        return -EINVAL;
+    for (i = 0; i < s->modules; i++) {
+        for (j = 0; j < 2; j++) {
+            s->module[i].config[j] = qemu_get_byte(f);
+            s->module[i].level[j] = qemu_get_be32(f);
+            s->module[i].edge[j] = qemu_get_be32(f);
+            s->module[i].mask[j] = qemu_get_be32(f);
+            s->module[i].ints[j] = qemu_get_be32(f);
+        }
+        s->module[i].inputs = qemu_get_be32(f);
+        s->module[i].outputs = qemu_get_be32(f);
+        s->module[i].dir = qemu_get_be32(f);
+        s->module[i].wumask = qemu_get_be32(f);
+        s->module[i].debounce = qemu_get_be32(f);
+        s->module[i].delay = qemu_get_byte(f);
+
+        omap_gpio_module_level_update(&s->module[i], 0);
+        omap_gpio_module_level_update(&s->module[i], 1);
+    }
+    
+    return 0;
+}
 
 static void omap_gpif_reset(struct omap_gpif_s *s)
 {
@@ -1044,7 +1289,8 @@ static CPUWriteMemoryFunc * const omap_gpif_top_writefn[] = {
     omap_gpif_top_write,
 };
 
-struct omap_gpif_s *omap2_gpio_init(struct omap_target_agent_s *ta,
+struct omap_gpif_s *omap2_gpio_init(struct omap_mpu_state_s *mpu,
+                struct omap_target_agent_s *ta,
                 qemu_irq *irq, omap_clk *fclk, omap_clk iclk, int modules)
 {
     int iomemtype, i;
@@ -1054,7 +1300,7 @@ struct omap_gpif_s *omap2_gpio_init(struct omap_target_agent_s *ta,
 
     s->modules = modules;
     for (i = 0; i < modules; i ++)
-        omap_gpio_module_init(s->module + i, ta, region[i],
+        omap_gpio_module_init(mpu, s->module + i, ta, region[i],
                         irq[i], 0, 0, fclk[i], iclk);
 
     omap_gpif_reset(s);
@@ -1064,6 +1310,26 @@ struct omap_gpif_s *omap2_gpio_init(struct omap_target_agent_s *ta,
     omap_l4_attach(ta, 1, iomemtype);
 
     return s;
+}
+
+struct omap_gpif_s *omap3_gpif_init()
+{
+    struct omap_gpif_s *s = (struct omap_gpif_s *)
+        qemu_mallocz(sizeof(struct omap_gpif_s));
+    omap_gpif_reset(s);
+    
+    register_savevm("omap_gpif", -1, 0,
+                    omap_gpif_save_state, omap_gpif_load_state, s);
+    return s;
+}
+
+void omap3_gpio_init(struct omap_mpu_state_s *mpu,
+                     struct omap_gpif_s *s,struct omap_target_agent_s *ta,
+                     qemu_irq irq, omap_clk *fclk, omap_clk iclk, int module_index)
+{
+    s->modules++;
+    omap_gpio_module_init(mpu, s->module + module_index, ta, 0,
+                          irq, 0, 0, NULL,NULL);
 }
 
 qemu_irq *omap2_gpio_in_get(struct omap_gpif_s *s, int start)
@@ -1078,329 +1344,6 @@ void omap2_gpio_out_set(struct omap_gpif_s *s, int line, qemu_irq handler)
     if (line >= s->modules * 32 || line < 0)
         hw_error("%s: No GPIO line %i\n", __FUNCTION__, line);
     s->module[line >> 5].handler[line & 31] = handler;
-}
-
-/* Multichannel SPI */
-struct omap_mcspi_s {
-    qemu_irq irq;
-    int chnum;
-
-    uint32_t sysconfig;
-    uint32_t systest;
-    uint32_t irqst;
-    uint32_t irqen;
-    uint32_t wken;
-    uint32_t control;
-
-    struct omap_mcspi_ch_s {
-        qemu_irq txdrq;
-        qemu_irq rxdrq;
-        uint32_t (*txrx)(void *opaque, uint32_t, int);
-        void *opaque;
-
-        uint32_t tx;
-        uint32_t rx;
-
-        uint32_t config;
-        uint32_t status;
-        uint32_t control;
-    } ch[4];
-};
-
-static inline void omap_mcspi_interrupt_update(struct omap_mcspi_s *s)
-{
-    qemu_set_irq(s->irq, s->irqst & s->irqen);
-}
-
-static inline void omap_mcspi_dmarequest_update(struct omap_mcspi_ch_s *ch)
-{
-    qemu_set_irq(ch->txdrq,
-                    (ch->control & 1) &&		/* EN */
-                    (ch->config & (1 << 14)) &&		/* DMAW */
-                    (ch->status & (1 << 1)) &&		/* TXS */
-                    ((ch->config >> 12) & 3) != 1);	/* TRM */
-    qemu_set_irq(ch->rxdrq,
-                    (ch->control & 1) &&		/* EN */
-                    (ch->config & (1 << 15)) &&		/* DMAW */
-                    (ch->status & (1 << 0)) &&		/* RXS */
-                    ((ch->config >> 12) & 3) != 2);	/* TRM */
-}
-
-static void omap_mcspi_transfer_run(struct omap_mcspi_s *s, int chnum)
-{
-    struct omap_mcspi_ch_s *ch = s->ch + chnum;
-
-    if (!(ch->control & 1))				/* EN */
-        return;
-    if ((ch->status & (1 << 0)) &&			/* RXS */
-                    ((ch->config >> 12) & 3) != 2 &&	/* TRM */
-                    !(ch->config & (1 << 19)))		/* TURBO */
-        goto intr_update;
-    if ((ch->status & (1 << 1)) &&			/* TXS */
-                    ((ch->config >> 12) & 3) != 1)	/* TRM */
-        goto intr_update;
-
-    if (!(s->control & 1) ||				/* SINGLE */
-                    (ch->config & (1 << 20))) {		/* FORCE */
-        if (ch->txrx)
-            ch->rx = ch->txrx(ch->opaque, ch->tx,	/* WL */
-                            1 + (0x1f & (ch->config >> 7)));
-    }
-
-    ch->tx = 0;
-    ch->status |= 1 << 2;				/* EOT */
-    ch->status |= 1 << 1;				/* TXS */
-    if (((ch->config >> 12) & 3) != 2)			/* TRM */
-        ch->status |= 1 << 0;				/* RXS */
-
-intr_update:
-    if ((ch->status & (1 << 0)) &&			/* RXS */
-                    ((ch->config >> 12) & 3) != 2 &&	/* TRM */
-                    !(ch->config & (1 << 19)))		/* TURBO */
-        s->irqst |= 1 << (2 + 4 * chnum);		/* RX_FULL */
-    if ((ch->status & (1 << 1)) &&			/* TXS */
-                    ((ch->config >> 12) & 3) != 1)	/* TRM */
-        s->irqst |= 1 << (0 + 4 * chnum);		/* TX_EMPTY */
-    omap_mcspi_interrupt_update(s);
-    omap_mcspi_dmarequest_update(ch);
-}
-
-static void omap_mcspi_reset(struct omap_mcspi_s *s)
-{
-    int ch;
-
-    s->sysconfig = 0;
-    s->systest = 0;
-    s->irqst = 0;
-    s->irqen = 0;
-    s->wken = 0;
-    s->control = 4;
-
-    for (ch = 0; ch < 4; ch ++) {
-        s->ch[ch].config = 0x060000;
-        s->ch[ch].status = 2;				/* TXS */
-        s->ch[ch].control = 0;
-
-        omap_mcspi_dmarequest_update(s->ch + ch);
-    }
-
-    omap_mcspi_interrupt_update(s);
-}
-
-static uint32_t omap_mcspi_read(void *opaque, target_phys_addr_t addr)
-{
-    struct omap_mcspi_s *s = (struct omap_mcspi_s *) opaque;
-    int ch = 0;
-    uint32_t ret;
-
-    switch (addr) {
-    case 0x00:	/* MCSPI_REVISION */
-        return 0x91;
-
-    case 0x10:	/* MCSPI_SYSCONFIG */
-        return s->sysconfig;
-
-    case 0x14:	/* MCSPI_SYSSTATUS */
-        return 1;					/* RESETDONE */
-
-    case 0x18:	/* MCSPI_IRQSTATUS */
-        return s->irqst;
-
-    case 0x1c:	/* MCSPI_IRQENABLE */
-        return s->irqen;
-
-    case 0x20:	/* MCSPI_WAKEUPENABLE */
-        return s->wken;
-
-    case 0x24:	/* MCSPI_SYST */
-        return s->systest;
-
-    case 0x28:	/* MCSPI_MODULCTRL */
-        return s->control;
-
-    case 0x68: ch ++;
-    case 0x54: ch ++;
-    case 0x40: ch ++;
-    case 0x2c:	/* MCSPI_CHCONF */
-        return s->ch[ch].config;
-
-    case 0x6c: ch ++;
-    case 0x58: ch ++;
-    case 0x44: ch ++;
-    case 0x30:	/* MCSPI_CHSTAT */
-        return s->ch[ch].status;
-
-    case 0x70: ch ++;
-    case 0x5c: ch ++;
-    case 0x48: ch ++;
-    case 0x34:	/* MCSPI_CHCTRL */
-        return s->ch[ch].control;
-
-    case 0x74: ch ++;
-    case 0x60: ch ++;
-    case 0x4c: ch ++;
-    case 0x38:	/* MCSPI_TX */
-        return s->ch[ch].tx;
-
-    case 0x78: ch ++;
-    case 0x64: ch ++;
-    case 0x50: ch ++;
-    case 0x3c:	/* MCSPI_RX */
-        s->ch[ch].status &= ~(1 << 0);			/* RXS */
-        ret = s->ch[ch].rx;
-        omap_mcspi_transfer_run(s, ch);
-        return ret;
-    }
-
-    OMAP_BAD_REG(addr);
-    return 0;
-}
-
-static void omap_mcspi_write(void *opaque, target_phys_addr_t addr,
-                uint32_t value)
-{
-    struct omap_mcspi_s *s = (struct omap_mcspi_s *) opaque;
-    int ch = 0;
-
-    switch (addr) {
-    case 0x00:	/* MCSPI_REVISION */
-    case 0x14:	/* MCSPI_SYSSTATUS */
-    case 0x30:	/* MCSPI_CHSTAT0 */
-    case 0x3c:	/* MCSPI_RX0 */
-    case 0x44:	/* MCSPI_CHSTAT1 */
-    case 0x50:	/* MCSPI_RX1 */
-    case 0x58:	/* MCSPI_CHSTAT2 */
-    case 0x64:	/* MCSPI_RX2 */
-    case 0x6c:	/* MCSPI_CHSTAT3 */
-    case 0x78:	/* MCSPI_RX3 */
-        OMAP_RO_REG(addr);
-        return;
-
-    case 0x10:	/* MCSPI_SYSCONFIG */
-        if (value & (1 << 1))				/* SOFTRESET */
-            omap_mcspi_reset(s);
-        s->sysconfig = value & 0x31d;
-        break;
-
-    case 0x18:	/* MCSPI_IRQSTATUS */
-        if (!((s->control & (1 << 3)) && (s->systest & (1 << 11)))) {
-            s->irqst &= ~value;
-            omap_mcspi_interrupt_update(s);
-        }
-        break;
-
-    case 0x1c:	/* MCSPI_IRQENABLE */
-        s->irqen = value & 0x1777f;
-        omap_mcspi_interrupt_update(s);
-        break;
-
-    case 0x20:	/* MCSPI_WAKEUPENABLE */
-        s->wken = value & 1;
-        break;
-
-    case 0x24:	/* MCSPI_SYST */
-        if (s->control & (1 << 3))			/* SYSTEM_TEST */
-            if (value & (1 << 11)) {			/* SSB */
-                s->irqst |= 0x1777f;
-                omap_mcspi_interrupt_update(s);
-            }
-        s->systest = value & 0xfff;
-        break;
-
-    case 0x28:	/* MCSPI_MODULCTRL */
-        if (value & (1 << 3))				/* SYSTEM_TEST */
-            if (s->systest & (1 << 11)) {		/* SSB */
-                s->irqst |= 0x1777f;
-                omap_mcspi_interrupt_update(s);
-            }
-        s->control = value & 0xf;
-        break;
-
-    case 0x68: ch ++;
-    case 0x54: ch ++;
-    case 0x40: ch ++;
-    case 0x2c:	/* MCSPI_CHCONF */
-        if ((value ^ s->ch[ch].config) & (3 << 14))	/* DMAR | DMAW */
-            omap_mcspi_dmarequest_update(s->ch + ch);
-        if (((value >> 12) & 3) == 3)			/* TRM */
-            fprintf(stderr, "%s: invalid TRM value (3)\n", __FUNCTION__);
-        if (((value >> 7) & 0x1f) < 3)			/* WL */
-            fprintf(stderr, "%s: invalid WL value (%i)\n",
-                            __FUNCTION__, (value >> 7) & 0x1f);
-        s->ch[ch].config = value & 0x7fffff;
-        break;
-
-    case 0x70: ch ++;
-    case 0x5c: ch ++;
-    case 0x48: ch ++;
-    case 0x34:	/* MCSPI_CHCTRL */
-        if (value & ~s->ch[ch].control & 1) {		/* EN */
-            s->ch[ch].control |= 1;
-            omap_mcspi_transfer_run(s, ch);
-        } else
-            s->ch[ch].control = value & 1;
-        break;
-
-    case 0x74: ch ++;
-    case 0x60: ch ++;
-    case 0x4c: ch ++;
-    case 0x38:	/* MCSPI_TX */
-        s->ch[ch].tx = value;
-        s->ch[ch].status &= ~(1 << 1);			/* TXS */
-        omap_mcspi_transfer_run(s, ch);
-        break;
-
-    default:
-        OMAP_BAD_REG(addr);
-        return;
-    }
-}
-
-static CPUReadMemoryFunc * const omap_mcspi_readfn[] = {
-    omap_badwidth_read32,
-    omap_badwidth_read32,
-    omap_mcspi_read,
-};
-
-static CPUWriteMemoryFunc * const omap_mcspi_writefn[] = {
-    omap_badwidth_write32,
-    omap_badwidth_write32,
-    omap_mcspi_write,
-};
-
-struct omap_mcspi_s *omap_mcspi_init(struct omap_target_agent_s *ta, int chnum,
-                qemu_irq irq, qemu_irq *drq, omap_clk fclk, omap_clk iclk)
-{
-    int iomemtype;
-    struct omap_mcspi_s *s = (struct omap_mcspi_s *)
-            qemu_mallocz(sizeof(struct omap_mcspi_s));
-    struct omap_mcspi_ch_s *ch = s->ch;
-
-    s->irq = irq;
-    s->chnum = chnum;
-    while (chnum --) {
-        ch->txdrq = *drq ++;
-        ch->rxdrq = *drq ++;
-        ch ++;
-    }
-    omap_mcspi_reset(s);
-
-    iomemtype = l4_register_io_memory(omap_mcspi_readfn,
-                    omap_mcspi_writefn, s);
-    omap_l4_attach(ta, 0, iomemtype);
-
-    return s;
-}
-
-void omap_mcspi_attach(struct omap_mcspi_s *s,
-                uint32_t (*txrx)(void *opaque, uint32_t, int), void *opaque,
-                int chipselect)
-{
-    if (chipselect < 0 || chipselect >= s->chnum)
-        hw_error("%s: Bad chipselect %i\n", __FUNCTION__, chipselect);
-
-    s->ch[chipselect].txrx = txrx;
-    s->ch[chipselect].opaque = opaque;
 }
 
 /* Enhanced Audio Controller (CODEC only) */
@@ -2171,22 +2114,6 @@ static struct omap_sti_s *omap_sti_init(struct omap_target_agent_s *ta,
 }
 
 /* L4 Interconnect */
-struct omap_target_agent_s {
-    struct omap_l4_s *bus;
-    int regions;
-    struct omap_l4_region_s *start;
-    target_phys_addr_t base;
-    uint32_t component;
-    uint32_t control;
-    uint32_t status;
-};
-
-struct omap_l4_s {
-    target_phys_addr_t base;
-    int ta_num;
-    struct omap_target_agent_s ta[0];
-};
-
 #ifdef L4_MUX_HACK
 static int omap_l4_io_entries;
 static int omap_cpu_io_entry;
@@ -2355,11 +2282,7 @@ static CPUWriteMemoryFunc * const omap_l4ta_writefn[] = {
 #define L4TA(n)		(n)
 #define L4TAO(n)	((n) + 39)
 
-static struct omap_l4_region_s {
-    target_phys_addr_t offset;
-    size_t size;
-    int access;
-} omap_l4_region[125] = {
+static struct omap_l4_region_s omap_l4_region[125] = {
     [  1] = { 0x40800,  0x800, 32          }, /* Initiator agent */
     [  2] = { 0x41000, 0x1000, 32          }, /* Link agent */
     [  0] = { 0x40000,  0x800, 32          }, /* Address and protection */
@@ -2487,12 +2410,7 @@ static struct omap_l4_region_s {
     [124] = { 0xb3000, 0x1000, 32 | 16 | 8 }, /* L4TA39 */
 };
 
-static struct omap_l4_agent_info_s {
-    int ta;
-    int region;
-    int regions;
-    int ta_region;
-} omap_l4_agent_info[54] = {
+static struct omap_l4_agent_info_s omap_l4_agent_info[54] = {
     { 0,           0, 3, 2 }, /* L4IA initiatior agent */
     { L4TAO(1),    3, 2, 1 }, /* Control and pinout module */
     { L4TAO(2),    5, 2, 1 }, /* 32K timer */
@@ -2552,7 +2470,7 @@ static struct omap_l4_agent_info_s {
 #define omap_l4ta(bus, cs)	omap_l4ta_get(bus, L4TA(cs))
 #define omap_l4tao(bus, cs)	omap_l4ta_get(bus, L4TAO(cs))
 
-struct omap_target_agent_s *omap_l4ta_get(struct omap_l4_s *bus, int cs)
+static struct omap_target_agent_s *omap_l4ta_get(struct omap_l4_s *bus, int cs)
 {
     int i, iomemtype;
     struct omap_target_agent_s *ta = 0;
@@ -2621,6 +2539,16 @@ target_phys_addr_t omap_l4_attach(struct omap_target_agent_s *ta, int region,
     return base;
 }
 
+target_phys_addr_t omap_l4_base(struct omap_target_agent_s *ta, int region)
+{
+    return ta->bus->base + ta->start[region].offset;
+}
+
+uint32_t omap_l4_size(struct omap_target_agent_s *ta, int region)
+{
+    return ta->start[region].size;
+}
+
 /* TEST-Chip-level TAP */
 static uint32_t omap_tap_read(void *opaque, target_phys_addr_t addr)
 {
@@ -2637,6 +2565,8 @@ static uint32_t omap_tap_read(void *opaque, target_phys_addr_t addr)
             return 0x5b68a02f;	/* ES 2.2 */
         case omap3430:
             return 0x1b7ae02f;	/* ES 2 */
+        case omap3530:
+            return 0x3b7ae02f;  /* ES 3.0 */
         default:
             hw_error("%s: Bad mpu model\n", __FUNCTION__);
         }
@@ -2654,6 +2584,8 @@ static uint32_t omap_tap_read(void *opaque, target_phys_addr_t addr)
             return 0x000000f0;
         case omap3430:
             return 0x000000f0;
+        case omap3530:
+            return 0x000f00f0;
         default:
             hw_error("%s: Bad mpu model\n", __FUNCTION__);
         }
@@ -2667,6 +2599,7 @@ static uint32_t omap_tap_read(void *opaque, target_phys_addr_t addr)
         case omap2430:
             return 0xcafeb68a;	/* ES 2.2 */
         case omap3430:
+        case omap3530:
             return 0xcafeb7ae;	/* ES 2 */
         default:
             hw_error("%s: Bad mpu model\n", __FUNCTION__);
@@ -3900,16 +3833,88 @@ struct omap_sysctl_s *omap_sysctl_init(struct omap_target_agent_s *ta,
 /* SDRAM Controller Subsystem */
 struct omap_sdrc_s {
     uint8_t config;
+    uint32_t cscfg;
+    uint32_t sharing;
+    uint32_t dlla_ctrl;
+    uint32_t power_reg;
+    struct {
+        uint32_t mcfg;
+        uint32_t mr;
+        uint32_t emr2;
+        uint32_t actim_ctrla;
+        uint32_t actim_ctrlb;
+        uint32_t rfr_ctrl;
+        uint32_t manual;
+    } cs[2];
 };
+
+static void omap_sdrc_save_state(QEMUFile *f, void *opaque)
+{
+    struct omap_sdrc_s *s = (struct omap_sdrc_s *)opaque;
+    int i;
+    
+    qemu_put_byte(f, s->config);
+    qemu_put_be32(f, s->cscfg);
+    qemu_put_be32(f, s->sharing);
+    qemu_put_be32(f, s->dlla_ctrl);
+    qemu_put_be32(f, s->power_reg);
+    for (i = 0; i < 2; i++) {
+        qemu_put_be32(f, s->cs[i].mcfg);
+        qemu_put_be32(f, s->cs[i].mr);
+        qemu_put_be32(f, s->cs[i].emr2);
+        qemu_put_be32(f, s->cs[i].actim_ctrla);
+        qemu_put_be32(f, s->cs[i].actim_ctrlb);
+        qemu_put_be32(f, s->cs[i].rfr_ctrl);
+        qemu_put_be32(f, s->cs[i].manual);
+    }
+}
+
+static int omap_sdrc_load_state(QEMUFile *f, void *opaque, int version_id)
+{
+    struct omap_sdrc_s *s = (struct omap_sdrc_s *)opaque;
+    int i;
+    
+    if (version_id)
+        return -EINVAL;
+    
+    s->config = qemu_get_byte(f);
+    s->cscfg = qemu_get_be32(f);
+    s->sharing = qemu_get_be32(f);
+    s->dlla_ctrl = qemu_get_be32(f);
+    s->power_reg = qemu_get_be32(f);
+    for (i = 0; i < 2; i++) {
+        s->cs[i].mcfg = qemu_get_be32(f);
+        s->cs[i].mr = qemu_get_be32(f);
+        s->cs[i].emr2 = qemu_get_be32(f);
+        s->cs[i].actim_ctrla = qemu_get_be32(f);
+        s->cs[i].actim_ctrlb = qemu_get_be32(f);
+        s->cs[i].rfr_ctrl = qemu_get_be32(f);
+        s->cs[i].manual = qemu_get_be32(f);
+    }
+    
+    return 0;
+}
 
 static void omap_sdrc_reset(struct omap_sdrc_s *s)
 {
-    s->config = 0x10;
+    s->config    = 0x10;
+    s->cscfg     = 0x4;
+    s->sharing   = 0; // TODO: copy from system control module
+    s->dlla_ctrl = 0;
+    s->power_reg = 0x85;
+    s->cs[0].mcfg        = s->cs[1].mcfg        = 0; // TODO: copy from system control module!
+    s->cs[0].mr          = s->cs[1].mr          = 0x0024;
+    s->cs[0].emr2        = s->cs[1].emr2        = 0;
+    s->cs[0].actim_ctrla = s->cs[1].actim_ctrla = 0;
+    s->cs[0].actim_ctrlb = s->cs[1].actim_ctrlb = 0;
+    s->cs[0].rfr_ctrl    = s->cs[1].rfr_ctrl    = 0;
+    s->cs[0].manual      = s->cs[1].manual      = 0;
 }
 
 static uint32_t omap_sdrc_read(void *opaque, target_phys_addr_t addr)
 {
     struct omap_sdrc_s *s = (struct omap_sdrc_s *) opaque;
+    int cs = 0;
 
     switch (addr) {
     case 0x00:	/* SDRC_REVISION */
@@ -3919,38 +3924,77 @@ static uint32_t omap_sdrc_read(void *opaque, target_phys_addr_t addr)
         return s->config;
 
     case 0x14:	/* SDRC_SYSSTATUS */
-        return 1;						/* RESETDONE */
+        return 1; /* RESETDONE */
 
     case 0x40:	/* SDRC_CS_CFG */
+        return s->cscfg;
+
     case 0x44:	/* SDRC_SHARING */
+        return s->sharing;
+            
     case 0x48:	/* SDRC_ERR_ADDR */
+        return 0;
+
     case 0x4c:	/* SDRC_ERR_TYPE */
+        return 0x8;
+            
     case 0x60:	/* SDRC_DLLA_SCTRL */
+        return s->dlla_ctrl;
+        
     case 0x64:	/* SDRC_DLLA_STATUS */
+        return ~(s->dlla_ctrl & 0x4);
+
     case 0x68:	/* SDRC_DLLB_CTRL */
     case 0x6c:	/* SDRC_DLLB_STATUS */
-    case 0x70:	/* SDRC_POWER */
-    case 0x80:	/* SDRC_MCFG_0 */
-    case 0x84:	/* SDRC_MR_0 */
-    case 0x88:	/* SDRC_EMR1_0 */
-    case 0x8c:	/* SDRC_EMR2_0 */
-    case 0x90:	/* SDRC_EMR3_0 */
-    case 0x94:	/* SDRC_DCDL1_CTRL */
-    case 0x98:	/* SDRC_DCDL2_CTRL */
-    case 0x9c:	/* SDRC_ACTIM_CTRLA_0 */
-    case 0xa0:	/* SDRC_ACTIM_CTRLB_0 */
-    case 0xa4:	/* SDRC_RFR_CTRL_0 */
-    case 0xa8:	/* SDRC_MANUAL_0 */
-    case 0xb0:	/* SDRC_MCFG_1 */
-    case 0xb4:	/* SDRC_MR_1 */
-    case 0xb8:	/* SDRC_EMR1_1 */
-    case 0xbc:	/* SDRC_EMR2_1 */
-    case 0xc0:	/* SDRC_EMR3_1 */
-    case 0xc4:	/* SDRC_ACTIM_CTRLA_1 */
-    case 0xc8:	/* SDRC_ACTIM_CTRLB_1 */
-    case 0xd4:	/* SDRC_RFR_CTRL_1 */
-    case 0xd8:	/* SDRC_MANUAL_1 */
         return 0x00;
+    
+    case 0x70:	/* SDRC_POWER */
+        return s->power_reg;
+
+    case 0xb0 ... 0xd8:
+        cs = 1;
+        addr -= 0x30;
+        /* fall through */
+    case 0x80 ... 0xa8:
+        switch (addr & 0x3f) {
+        case 0x00: /* SDRC_MCFG_x */
+            return s->cs[cs].mcfg;
+        case 0x04: /* SDRC_MR_x */
+            return s->cs[cs].mr;
+        case 0x08: /* SDRC_EMR1_x */
+            return 0x00;
+        case 0x0c: /* SDRC_EMR2_x */
+            return s->cs[cs].emr2;
+        case 0x10: /* SDRC_EMR3_x */
+            return 0x00;
+        case 0x14:
+            if (cs)
+                return s->cs[1].actim_ctrla; /* SDRC_ACTIM_CTRLA_1 */
+            return 0x00;                     /* SDRC_DCDL1_CTRL */
+        case 0x18:
+            if (cs)
+                return s->cs[1].actim_ctrlb; /* SDRC_ACTIM_CTRLB_1 */
+            return 0x00;                     /* SDRC_DCDL2_CTRL */
+        case 0x1c:
+            if (!cs)
+                return s->cs[0].actim_ctrla; /* SDRC_ACTIM_CTRLA_0 */
+            break;
+        case 0x20:
+            if (!cs)
+                return s->cs[0].actim_ctrlb; /* SDRC_ACTIM_CTRLB_0 */
+            break;
+        case 0x24: /* SDRC_RFR_CTRL_x */
+            return s->cs[cs].rfr_ctrl;
+        case 0x28: /* SDRC_MANUAL_x */
+            return s->cs[cs].manual;
+        default:
+            break;
+        }
+        addr += cs * 0x30; // restore address to get correct error messages
+        break;
+
+    default:
+        break;
     }
 
     OMAP_BAD_REG(addr);
@@ -3961,6 +4005,7 @@ static void omap_sdrc_write(void *opaque, target_phys_addr_t addr,
                 uint32_t value)
 {
     struct omap_sdrc_s *s = (struct omap_sdrc_s *) opaque;
+    int cs = 0;
 
     switch (addr) {
     case 0x00:	/* SDRC_REVISION */
@@ -3968,49 +4013,104 @@ static void omap_sdrc_write(void *opaque, target_phys_addr_t addr,
     case 0x48:	/* SDRC_ERR_ADDR */
     case 0x64:	/* SDRC_DLLA_STATUS */
     case 0x6c:	/* SDRC_DLLB_STATUS */
-        OMAP_RO_REG(addr);
-        return;
+        OMAP_RO_REGV(addr, value);
+        break;
 
     case 0x10:	/* SDRC_SYSCONFIG */
-        if ((value >> 3) != 0x2)
-            fprintf(stderr, "%s: bad SDRAM idle mode %i\n",
-                            __FUNCTION__, value >> 3);
+        /* ignore invalid idle mode settings */
+        /*if ((value >> 3) != 0x2)
+            fprintf(stderr, "%s: bad SDRAM idle mode %i for SDRC_SYSCONFIG (full value 0x%08x)\n",
+                            __FUNCTION__, value >> 3, value);*/
         if (value & 2)
             omap_sdrc_reset(s);
         s->config = value & 0x18;
         break;
 
     case 0x40:	/* SDRC_CS_CFG */
+        s->cscfg = value & 0x30f;
+        break;
+
     case 0x44:	/* SDRC_SHARING */
+        if (!(s->sharing & 0x40000000)) /* LOCK */
+            s->sharing = value & 0x40007f00;
+        break;
+
     case 0x4c:	/* SDRC_ERR_TYPE */
-    case 0x60:	/* SDRC_DLLA_SCTRL */
+        OMAP_BAD_REGV(addr, value);
+        break;
+
+    case 0x60:	/* SDRC_DLLA_CTRL */
+        s->dlla_ctrl = value & 0xffff00fe;
+        break;
+
     case 0x68:	/* SDRC_DLLB_CTRL */
-    case 0x70:	/* SDRC_POWER */
-    case 0x80:	/* SDRC_MCFG_0 */
-    case 0x84:	/* SDRC_MR_0 */
-    case 0x88:	/* SDRC_EMR1_0 */
-    case 0x8c:	/* SDRC_EMR2_0 */
-    case 0x90:	/* SDRC_EMR3_0 */
-    case 0x94:	/* SDRC_DCDL1_CTRL */
-    case 0x98:	/* SDRC_DCDL2_CTRL */
-    case 0x9c:	/* SDRC_ACTIM_CTRLA_0 */
-    case 0xa0:	/* SDRC_ACTIM_CTRLB_0 */
-    case 0xa4:	/* SDRC_RFR_CTRL_0 */
-    case 0xa8:	/* SDRC_MANUAL_0 */
-    case 0xb0:	/* SDRC_MCFG_1 */
-    case 0xb4:	/* SDRC_MR_1 */
-    case 0xb8:	/* SDRC_EMR1_1 */
-    case 0xbc:	/* SDRC_EMR2_1 */
-    case 0xc0:	/* SDRC_EMR3_1 */
-    case 0xc4:	/* SDRC_ACTIM_CTRLA_1 */
-    case 0xc8:	/* SDRC_ACTIM_CTRLB_1 */
-    case 0xd4:	/* SDRC_RFR_CTRL_1 */
-    case 0xd8:	/* SDRC_MANUAL_1 */
+        /* silently ignore */
+        /*OMAP_BAD_REGV(addr, value);*/
+        break;
+        
+    case 0x70:	/* SDRC_POWER_REG */
+        s->power_reg = value & 0x04fffffd;
+        break;
+
+    case 0xb0 ... 0xd8:
+        cs = 1;
+        addr -= 0x30;
+        /* fall through */
+    case 0x80 ... 0xa8:
+        switch (addr & 0x3f) {
+        case 0x00: /* SDRC_MCFG_x */
+            if (!(s->cs[cs].mcfg & 0x40000000)) { /* LOCKSTATUS */
+                if (value & 0x00080000) /* ADDRMUXLEGACY */
+                    s->cs[cs].mcfg = value & 0x477bffdf;
+                else
+                    s->cs[cs].mcfg = value & 0x41fbffdf; // ????
+            }
+            break;
+        case 0x04: /* SDRC_MR_x */
+            s->cs[cs].mr = value & 0xfff;
+            break;
+        case 0x08: /* SDRC_EMR1_x */
+            break;
+        case 0x0c: /* SDRC_EMR2_x */
+            s->cs[cs].emr2 = value & 0xfff;
+            break;
+        case 0x10: /* SDRC_EMR3_x */
+            break;
+        case 0x14:
+            if (cs)
+                s->cs[1].actim_ctrla = value & 0xffffffdf; /* SDRC_ACTIM_CTRLA_1 */
+            break;                                         /* SDRC_DCDL1_CTRL */
+        case 0x18:
+            if (cs)
+                s->cs[1].actim_ctrlb = value & 0x000377ff; /* SDRC_ACTIM_CTRLB_1 */
+            break;                                         /* SDRC_DCDL2_CTRL */
+        case 0x1c:
+            if (!cs)
+                s->cs[0].actim_ctrla = value & 0xffffffdf; /* SDRC_ACTIM_CTRLA_0 */
+            else
+                OMAP_BAD_REGV(addr + 0x30, value);
+            break;
+        case 0x20:
+            if (!cs)
+                s->cs[0].actim_ctrlb = value & 0x000377ff; /* SDRC_ACTIM_CTRLB_0 */
+            else
+                OMAP_BAD_REGV(addr + 0x30, value);
+            break;
+        case 0x24: /* SDRC_RFR_CTRL_x */
+            s->cs[cs].rfr_ctrl = value & 0x00ffff03;
+            break;
+        case 0x28: /* SDRC_MANUAL_x */
+            s->cs[cs].manual = value & 0xffff000f;
+            break;
+        default:
+            OMAP_BAD_REGV(addr + cs * 0x30, value);
+            break;
+        }
         break;
 
     default:
-        OMAP_BAD_REG(addr);
-        return;
+        OMAP_BAD_REGV(addr, value);
+        break;
     }
 }
 
@@ -4038,6 +4138,8 @@ struct omap_sdrc_s *omap_sdrc_init(target_phys_addr_t base)
                     omap_sdrc_writefn, s);
     cpu_register_physical_memory(base, 0x1000, iomemtype);
 
+    register_savevm("omap_sdrc", -1, 0,
+                    omap_sdrc_save_state, omap_sdrc_load_state, s);
     return s;
 }
 
@@ -4045,6 +4147,7 @@ struct omap_sdrc_s *omap_sdrc_init(target_phys_addr_t base)
 struct omap_gpmc_s {
     qemu_irq irq;
 
+    uint8_t revision;
     uint8_t sysconfig;
     uint16_t irqst;
     uint16_t irqen;
@@ -4140,7 +4243,7 @@ static void omap_gpmc_reset(struct omap_gpmc_s *s)
         s->cs_file[i].config[6] = 0xf00 | (i ? 0 : 1 << 6);
         if (s->cs_file[i].config[6] & (1 << 6))			/* CSVALID */
             omap_gpmc_cs_map(&s->cs_file[i],
-                            s->cs_file[i].config[6] & 0x1f,	/* MASKADDR */
+                            s->cs_file[i].config[6] & 0x3f,	/* MASKADDR */
                         (s->cs_file[i].config[6] >> 8 & 0xf));	/* BASEADDR */
     }
     omap_gpmc_cs_map(s->cs_file, 0, 0xf);
@@ -4151,15 +4254,86 @@ static void omap_gpmc_reset(struct omap_gpmc_s *s)
         ecc_reset(&s->ecc[i]);
 }
 
+static void omap_gpmc_save_state(QEMUFile *f, void *opaque)
+{
+    struct omap_gpmc_s *s = (struct omap_gpmc_s *)opaque;
+    int i, j;
+    
+    qemu_put_byte(f, s->sysconfig);
+    qemu_put_be16(f, s->irqst);
+    qemu_put_be16(f, s->irqen);
+    qemu_put_be16(f, s->timeout);
+    qemu_put_be16(f, s->config);
+    qemu_put_be32(f, s->prefconfig[0]);
+    qemu_put_be32(f, s->prefconfig[1]);
+    qemu_put_sbe32(f, s->prefcontrol);
+    qemu_put_sbe32(f, s->preffifo);
+    qemu_put_sbe32(f, s->prefcount);
+    for (i = 0; i < 8; i++)
+        for (j = 0; j < 7; j++)
+            qemu_put_be32(f, s->cs_file[i].config[j]);
+    qemu_put_sbe32(f, s->ecc_cs);
+    qemu_put_sbe32(f, s->ecc_ptr);
+    qemu_put_be32(f, s->ecc_cfg);
+    for (i = 0; i < 9; i++) {
+        qemu_put_byte(f, s->ecc[i].cp);
+        qemu_put_be16(f, s->ecc[i].lp[0]);
+        qemu_put_be16(f, s->ecc[i].lp[1]);
+        qemu_put_be16(f, s->ecc[i].count);
+    }
+}
+
+static int omap_gpmc_load_state(QEMUFile *f, void *opaque, int version_id)
+{
+    struct omap_gpmc_s *s = (struct omap_gpmc_s *)opaque;
+    int i, j;
+    
+    if (version_id)
+        return -EINVAL;
+    
+    s->sysconfig = qemu_get_byte(f);
+    s->irqst = qemu_get_be16(f);
+    s->irqen = qemu_get_be16(f);
+    s->timeout = qemu_get_be16(f);
+    s->config = qemu_get_be16(f);
+    s->prefconfig[0] = qemu_get_be32(f);
+    s->prefconfig[1] = qemu_get_be32(f);
+    s->prefcontrol = qemu_get_sbe32(f);
+    s->preffifo = qemu_get_sbe32(f);
+    s->prefcount = qemu_get_sbe32(f);
+    for (i = 0; i < 8; i++) {
+        for (j = 0; j < 7; j++)
+            s->cs_file[i].config[j] = qemu_get_be32(f);
+        if (s->cs_file[i].config[6] & (1 << 6)) /* CSVALID */
+            omap_gpmc_cs_map(&s->cs_file[i],
+                             s->cs_file[i].config[6] & 0x3f, /* MASKADDR */
+                             (s->cs_file[i].config[6] >> 8 & 0xf));	/* BASE */
+    }        
+    s->ecc_cs = qemu_get_sbe32(f);
+    s->ecc_ptr = qemu_get_sbe32(f);
+    s->ecc_cfg = qemu_get_be32(f);
+    for (i = 0; i < 9; i++) {
+        s->ecc[i].cp = qemu_get_byte(f);
+        s->ecc[i].lp[0] = qemu_get_be16(f);
+        s->ecc[i].lp[1] = qemu_get_be16(f);
+        s->ecc[i].count = qemu_get_be16(f);
+    }
+    
+    omap_gpmc_int_update(s);
+    
+    return 0;
+}
+
 static uint32_t omap_gpmc_read(void *opaque, target_phys_addr_t addr)
 {
     struct omap_gpmc_s *s = (struct omap_gpmc_s *) opaque;
     int cs;
     struct omap_gpmc_cs_file_s *f;
+    uint32_t x1, x2, x3, x4;
 
     switch (addr) {
     case 0x000:	/* GPMC_REVISION */
-        return 0x20;
+        return s->revision;
 
     case 0x010:	/* GPMC_SYSCONFIG */
         return s->sysconfig;
@@ -4206,7 +4380,27 @@ static uint32_t omap_gpmc_read(void *opaque, target_phys_addr_t addr)
             case 0x78:	/* GPMC_CONFIG7 */
                 return f->config[6];
             case 0x84:	/* GPMC_NAND_DATA */
+                if (((f->config[0] >> 10) & 3) == 2 /* NAND device type ? */
+                    && f->opaque) {
+                    nand_setpins(f->opaque, 0, 0, 0, 1, 0);
+                    switch (((f->config[0] >> 12) & 3)) {
+                        case 0: /* 8bit */
+                            x1 = nand_getio(f->opaque);
+                            x2 = nand_getio(f->opaque);
+                            x3 = nand_getio(f->opaque);
+                            x4 = nand_getio(f->opaque);
+                            return (x4 << 24) | (x3 << 16) | (x2 << 8) | x1;
+                        case 1: /* 16bit */
+                            x1 = nand_getio(f->opaque);
+                            x2 = nand_getio(f->opaque);
+                            return (x2 << 16) | x1;
+                        default:
+                            return 0;
+                    }
+                }
                 return 0;
+            default:
+                break;
         }
         break;
 
@@ -4248,6 +4442,85 @@ static uint32_t omap_gpmc_read(void *opaque, target_phys_addr_t addr)
     return 0;
 }
 
+static uint32_t omap_gpmc_read8(void *opaque, target_phys_addr_t addr)
+{
+    struct omap_gpmc_s *s = (struct omap_gpmc_s *) opaque;
+    int cs;
+    struct omap_gpmc_cs_file_s *f;
+    
+    switch (addr) {
+        case 0x060 ... 0x1d4:
+            cs = (addr - 0x060) / 0x30;
+            addr -= cs * 0x30;
+            f = s->cs_file + cs;
+            switch (addr) {
+                case 0x84 ... 0x87:	/* GPMC_NAND_DATA */
+                    if (((f->config[0] >> 10) & 3) == 2 /* NAND device type ? */
+                        && f->opaque) {
+                        nand_setpins(f->opaque, 0, 0, 0, 1, 0);
+                        switch (((f->config[0] >> 12) & 3)) {
+                            case 0: /* 8bit */
+                                return nand_getio(f->opaque);
+                            case 1: /* 16bit */
+                                /* reading 8bits from a 16bit device?! */
+                                return nand_getio(f->opaque);
+                            default:
+                                return 0;
+                        }
+                    }
+                    return 0;
+                default:
+                    break;
+            }
+            break;
+        default:
+            break;
+    }
+    OMAP_BAD_REG(addr);
+    return 0;
+}
+
+static uint32_t omap_gpmc_read16(void *opaque, target_phys_addr_t addr)
+{
+    struct omap_gpmc_s *s = (struct omap_gpmc_s *) opaque;
+    int cs;
+    struct omap_gpmc_cs_file_s *f;
+    uint32_t x1, x2;
+    
+    switch (addr) {
+        case 0x060 ... 0x1d4:
+            cs = (addr - 0x060) / 0x30;
+            addr -= cs * 0x30;
+            f = s->cs_file + cs;
+            switch (addr) {
+                case 0x84:	/* GPMC_NAND_DATA */
+                case 0x86:
+                    if (((f->config[0] >> 10) & 3) == 2 /* NAND device type ? */
+                        && f->opaque) {
+                        nand_setpins(f->opaque, 0, 0, 0, 1, 0);
+                        switch (((f->config[0] >> 12) & 3)) {
+                            case 0: /* 8bit */
+                                x1 = nand_getio(f->opaque);
+                                x2 = nand_getio(f->opaque);
+                                return (x2 << 8) | x1;
+                            case 1: /* 16bit */
+                                return nand_getio(f->opaque);
+                            default:
+                                return 0;
+                        }
+                    }
+                    return 0;
+                default:
+                    break;
+            }
+            break;
+        default:
+            break;
+    }
+    OMAP_BAD_REG(addr);
+    return 0;
+}
+
 static void omap_gpmc_write(void *opaque, target_phys_addr_t addr,
                 uint32_t value)
 {
@@ -4263,7 +4536,7 @@ static void omap_gpmc_write(void *opaque, target_phys_addr_t addr,
     case 0x200 ... 0x220:	/* GPMC_ECC_RESULT */
     case 0x234:	/* GPMC_PSA_LSB */
     case 0x238:	/* GPMC_PSA_MSB */
-        OMAP_RO_REG(addr);
+        OMAP_RO_REGV(addr, value);
         break;
 
     case 0x010:	/* GPMC_SYSCONFIG */
@@ -4325,7 +4598,7 @@ static void omap_gpmc_write(void *opaque, target_phys_addr_t addr,
                     if (f->config[6] & (1 << 6))		/* CSVALID */
                         omap_gpmc_cs_unmap(f);
                     if (value & (1 << 6))			/* CSVALID */
-                        omap_gpmc_cs_map(f, value & 0x1f,	/* MASKADDR */
+                        omap_gpmc_cs_map(f, value & 0x3f,	/* MASKADDR */
                                         (value >> 8 & 0xf));	/* BASEADDR */
                 }
                 f->config[6] = value & 0x00000f7f;
@@ -4333,8 +4606,30 @@ static void omap_gpmc_write(void *opaque, target_phys_addr_t addr,
             case 0x7c:	/* GPMC_NAND_COMMAND */
             case 0x80:	/* GPMC_NAND_ADDRESS */
             case 0x84:	/* GPMC_NAND_DATA */
+                if (((f->config[0] >> 10) & 3) == 2 /* NAND device type ? */
+                    && f->opaque) {
+                    switch (addr) {
+                        case 0x7c: nand_setpins(f->opaque, 1, 0, 0, 1, 0); break; /* CLE */
+                        case 0x80: nand_setpins(f->opaque, 0, 1, 0, 1, 0); break; /* ALE */
+                        case 0x84: nand_setpins(f->opaque, 0, 0, 0, 1, 0); break;
+                        default: break;
+                    }
+                    switch (((f->config[0] >> 12) & 3)) {
+                        case 0: /* 8bit */
+                            nand_setio(f->opaque, value & 0xff);
+                            nand_setio(f->opaque, (value >> 8) & 0xff);
+                            nand_setio(f->opaque, (value >> 16) & 0xff);
+                            nand_setio(f->opaque, (value >> 24) & 0xff);
+                            break;
+                        case 1: /* 16bit */
+                            nand_setio(f->opaque, value & 0xffff);
+                            nand_setio(f->opaque, (value >> 16) & 0xffff);
+                            break;
+                        default:
+                            break;
+                    }
+                }
                 break;
-
             default:
                 goto bad_reg;
         }
@@ -4383,41 +4678,163 @@ static void omap_gpmc_write(void *opaque, target_phys_addr_t addr,
 
     default:
     bad_reg:
-        OMAP_BAD_REG(addr);
+        OMAP_BAD_REGV(addr, value);
         return;
     }
 }
 
+static void omap_gpmc_write8(void *opaque, target_phys_addr_t addr,
+                             uint32_t value)
+{
+    struct omap_gpmc_s *s = (struct omap_gpmc_s *) opaque;
+    int cs;
+    struct omap_gpmc_cs_file_s *f;
+
+    switch (addr) {
+        case 0x060 ... 0x1d4:
+            cs = (addr - 0x060) / 0x30;
+            addr -= cs * 0x30;
+            f = s->cs_file + cs;
+            switch (addr) {
+                case 0x7c ... 0x7f:   /* GPMC_NAND_COMMAND */
+                case 0x80 ... 0x83:   /* GPMC_NAND_ADDRESS */
+                case 0x84 ... 0x87:   /* GPMC_NAND_DATA */
+                    if (((f->config[0] >> 10) & 3) == 2 /* NAND device type ? */
+                        && f->opaque) {
+                        switch (addr) {
+                            case 0x7c ... 0x7f:
+                                nand_setpins(f->opaque, 1, 0, 0, 1, 0); /* CLE */
+                                break;
+                            case 0x80 ... 0x83:
+                                nand_setpins(f->opaque, 0, 1, 0, 1, 0); /* ALE */
+                                break;
+                            case 0x84 ... 0x87:
+                                nand_setpins(f->opaque, 0, 0, 0, 1, 0);
+                                break;
+                            default:
+                                break;
+                        }
+                        switch (((f->config[0] >> 12) & 3)) {
+                            case 0: /* 8bit */
+                                nand_setio(f->opaque, value & 0xff);
+                                break;
+                            case 1: /* 16bit */
+                                /* writing to a 16bit device with 8bit access!? */
+                                nand_setio(f->opaque, value & 0xffff);
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                    break;
+                default:
+                    goto bad_reg;
+            }
+            break;
+        default:
+        bad_reg:
+            OMAP_BAD_REGV(addr, value);
+            return;
+    }
+}
+
+static void omap_gpmc_write16(void *opaque, target_phys_addr_t addr,
+                              uint32_t value)
+{
+    struct omap_gpmc_s *s = (struct omap_gpmc_s *) opaque;
+    int cs;
+    struct omap_gpmc_cs_file_s *f;
+
+    switch (addr) {
+        case 0x060 ... 0x1d4:
+            cs = (addr - 0x060) / 0x30;
+            addr -= cs * 0x30;
+            f = s->cs_file + cs;
+            switch (addr) {
+                case 0x7c:    /* GPMC_NAND_COMMAND */
+                case 0x7e:
+                case 0x80:    /* GPMC_NAND_ADDRESS */
+                case 0x82:
+                case 0x84:    /* GPMC_NAND_DATA */
+                case 0x86:
+                    if (((f->config[0] >> 10) & 3) == 2 /* NAND device type ? */
+                        && f->opaque) {
+                        switch (addr) {
+                            case 0x7c:
+                            case 0x7e:
+                                nand_setpins(f->opaque, 1, 0, 0, 1, 0); /* CLE */
+                                break;
+                            case 0x80:
+                            case 0x82:
+                                nand_setpins(f->opaque, 0, 1, 0, 1, 0); /* ALE */
+                                break;
+                            case 0x84:
+                            case 0x86:
+                                nand_setpins(f->opaque, 0, 0, 0, 1, 0);
+                                break;
+                            default:
+                                break;
+                        }
+                        switch (((f->config[0] >> 12) & 3)) {
+                            case 0: /* 8bit */
+                                nand_setio(f->opaque, value & 0xff);
+                                nand_setio(f->opaque, (value >> 8) & 0xff);
+                                break;
+                            case 1: /* 16bit */
+                                nand_setio(f->opaque, value & 0xffff);
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                    break;
+                default:
+                    goto bad_reg;
+            }
+            break;
+        default:
+        bad_reg:
+            OMAP_BAD_REGV(addr, value);
+            return;
+    }
+}
+
 static CPUReadMemoryFunc * const omap_gpmc_readfn[] = {
-    omap_badwidth_read32,	/* TODO */
-    omap_badwidth_read32,	/* TODO */
+    omap_gpmc_read8,
+    omap_gpmc_read16,
     omap_gpmc_read,
 };
 
 static CPUWriteMemoryFunc * const omap_gpmc_writefn[] = {
-    omap_badwidth_write32,	/* TODO */
-    omap_badwidth_write32,	/* TODO */
+    omap_gpmc_write8,
+    omap_gpmc_write16,
     omap_gpmc_write,
 };
 
-struct omap_gpmc_s *omap_gpmc_init(target_phys_addr_t base, qemu_irq irq)
+struct omap_gpmc_s *omap_gpmc_init(struct omap_mpu_state_s *mpu,
+                                   target_phys_addr_t base, qemu_irq irq)
 {
     int iomemtype;
     struct omap_gpmc_s *s = (struct omap_gpmc_s *)
             qemu_mallocz(sizeof(struct omap_gpmc_s));
 
+    s->revision = cpu_class_omap3(mpu) ? 0x50 : 0x20;
     omap_gpmc_reset(s);
 
     iomemtype = cpu_register_io_memory(omap_gpmc_readfn,
                     omap_gpmc_writefn, s);
     cpu_register_physical_memory(base, 0x1000, iomemtype);
 
+    register_savevm("omap_gpmc", -1, 0,
+                    omap_gpmc_save_state, omap_gpmc_load_state, s);
+
     return s;
 }
 
 void omap_gpmc_attach(struct omap_gpmc_s *s, int cs, int iomemtype,
                 void (*base_upd)(void *opaque, target_phys_addr_t new),
-                void (*unmap)(void *opaque), void *opaque)
+                void (*unmap)(void *opaque), void *opaque,
+                int devicetype)
 {
     struct omap_gpmc_cs_file_s *f;
 
@@ -4432,8 +4849,16 @@ void omap_gpmc_attach(struct omap_gpmc_s *s, int cs, int iomemtype,
     f->unmap = unmap;
     f->opaque = opaque;
 
+    f->config[0] &= ~(0x3 << 10);
+    f->config[0] |= (devicetype & 3) << 10;
+    if (devicetype == 2) { /* NAND */
+        f->config[0] &= ~(0x3 << 12);
+        if (nand_getbuswidth(f->opaque) == 16)
+            f->config[0] |= 1 << 12;
+    }
+    
     if (f->config[6] & (1 << 6))				/* CSVALID */
-        omap_gpmc_cs_map(f, f->config[6] & 0x1f,		/* MASKADDR */
+        omap_gpmc_cs_map(f, f->config[6] & 0x3f,		/* MASKADDR */
                         (f->config[6] >> 8 & 0xf));		/* BASEADDR */
 }
 
@@ -4524,7 +4949,8 @@ struct omap_mpu_state_s *omap2420_mpu_init(unsigned long sdram_size,
 
     /* Actually mapped at any 2K boundary in the ARM11 private-peripheral if */
     cpu_irq = arm_pic_init_cpu(s->env);
-    s->ih[0] = omap2_inth_init(0x480fe000, 0x1000, 3, &s->irq[0],
+    s->ih[0] = omap2_inth_init(s,
+                    0x480fe000, 0x1000, 3, &s->irq[0],
                     cpu_irq[ARM_PIC_CPU_IRQ], cpu_irq[ARM_PIC_CPU_FIQ],
                     omap_findclk(s, "mpu_intc_fclk"),
                     omap_findclk(s, "mpu_intc_iclk"));
@@ -4638,12 +5064,12 @@ struct omap_mpu_state_s *omap2420_mpu_init(unsigned long sdram_size,
     gpio_clks[1] = omap_findclk(s, "gpio2_dbclk");
     gpio_clks[2] = omap_findclk(s, "gpio3_dbclk");
     gpio_clks[3] = omap_findclk(s, "gpio4_dbclk");
-    s->gpif = omap2_gpio_init(omap_l4ta(s->l4, 3),
+    s->gpif = omap2_gpio_init(s, omap_l4ta(s->l4, 3),
                     &s->irq[0][OMAP_INT_24XX_GPIO_BANK1],
                     gpio_clks, omap_findclk(s, "gpio_iclk"), 4);
 
     s->sdrc = omap_sdrc_init(0x68009000);
-    s->gpmc = omap_gpmc_init(0x6800a000, s->irq[0][OMAP_INT_24XX_GPMC_IRQ]);
+    s->gpmc = omap_gpmc_init(s, 0x6800a000, s->irq[0][OMAP_INT_24XX_GPMC_IRQ]);
 
     dinfo = drive_get(IF_SD, 0, 0);
     if (!dinfo) {
@@ -4655,18 +5081,18 @@ struct omap_mpu_state_s *omap2420_mpu_init(unsigned long sdram_size,
                     &s->drq[OMAP24XX_DMA_MMC1_TX],
                     omap_findclk(s, "mmc_fclk"), omap_findclk(s, "mmc_iclk"));
 
-    s->mcspi[0] = omap_mcspi_init(omap_l4ta(s->l4, 35), 4,
+    s->mcspi[0] = omap_mcspi_init(omap_l4ta(s->l4, 35), s, 4,
                     s->irq[0][OMAP_INT_24XX_MCSPI1_IRQ],
                     &s->drq[OMAP24XX_DMA_SPI1_TX0],
                     omap_findclk(s, "spi1_fclk"),
                     omap_findclk(s, "spi1_iclk"));
-    s->mcspi[1] = omap_mcspi_init(omap_l4ta(s->l4, 36), 2,
+    s->mcspi[1] = omap_mcspi_init(omap_l4ta(s->l4, 36), s, 2,
                     s->irq[0][OMAP_INT_24XX_MCSPI2_IRQ],
                     &s->drq[OMAP24XX_DMA_SPI2_TX0],
                     omap_findclk(s, "spi2_fclk"),
                     omap_findclk(s, "spi2_iclk"));
 
-    s->dss = omap_dss_init(omap_l4ta(s->l4, 10), 0x68000800,
+    s->dss = omap_dss_init(omap_l4ta(s->l4, 10),
                     /* XXX wire M_IRQ_25, D_L2_IRQ_30 and I_IRQ_13 together */
                     s->irq[0][OMAP_INT_24XX_DSS_IRQ], s->drq[OMAP24XX_DMA_DSS],
                     omap_findclk(s, "dss_clk1"), omap_findclk(s, "dss_clk2"),

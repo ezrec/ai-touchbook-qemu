@@ -30,6 +30,7 @@
 #include "flash.h"
 #include "hw.h"
 #include "bt.h"
+#include "net.h"
 
 /* Nokia N8x0 support */
 struct n800_s {
@@ -163,12 +164,12 @@ static void n8x0_nand_setup(struct n800_s *s)
 {
     char *otp_region;
 
-    /* Either ec40xx or ec48xx are OK for the ID */
+    /* Either 0x40 or 0x48 are OK for the device ID */
+    s->nand = onenand_init(NAND_MFR_SAMSUNG, 0x48, 0, 1,
+                           omap2_gpio_in_get(s->cpu->gpif,N8X0_ONENAND_GPIO)[0],
+                           drive_get(IF_MTD, 0, 0));
     omap_gpmc_attach(s->cpu->gpmc, N8X0_ONENAND_CS, 0, onenand_base_update,
-                    onenand_base_unmap,
-                    (s->nand = onenand_init(0xec4800, 1,
-                                            omap2_gpio_in_get(s->cpu->gpif,
-                                                    N8X0_ONENAND_GPIO)[0])));
+                     onenand_base_unmap, s->nand, 0);
     otp_region = onenand_raw_otp(s->nand);
 
     memcpy(otp_region + 0x000, n8x0_cal_wlan_mac, sizeof(n8x0_cal_wlan_mac));
@@ -768,9 +769,9 @@ static void n8x0_usb_setup(struct n800_s *s)
 
     /* Using the NOR interface */
     omap_gpmc_attach(s->cpu->gpmc, N8X0_USB_ASYNC_CS,
-                    tusb6010_async_io(tusb), 0, 0, tusb);
+                     tusb6010_async_io(tusb), 0, 0, tusb, 0);
     omap_gpmc_attach(s->cpu->gpmc, N8X0_USB_SYNC_CS,
-                    tusb6010_sync_io(tusb), 0, 0, tusb);
+                     tusb6010_sync_io(tusb), 0, 0, tusb, 0);
 
     s->usb = tusb;
     omap2_gpio_out_set(s->cpu->gpif, N8X0_TUSB_ENABLE_GPIO, tusb_pwr);
@@ -1240,7 +1241,7 @@ static int n8x0_atag_setup(void *p, int model)
     stw_raw(w ++, 24);				/* u16 len */
     strcpy((void *) w, "hw-build");		/* char component[12] */
     w += 6;
-    strcpy((void *) w, "QEMU " QEMU_VERSION);	/* char version[12] */
+    strcpy((void *) w, "QEMU");	/* char version[12] */
     w += 6;
 
     tag = (model == 810) ? "1.1.10-qemu" : "1.1.6-qemu";
