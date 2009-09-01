@@ -31,6 +31,7 @@
 #include "usb.h"
 #include "pci.h"
 #include "pxa.h"
+#include "omap.h"
 #include "devices.h"
 
 //#define DEBUG_OHCI
@@ -61,6 +62,7 @@ typedef struct OHCIPort {
 enum ohci_type {
     OHCI_TYPE_PCI,
     OHCI_TYPE_PXA,
+    OHCI_TYPE_OMAP,
     OHCI_TYPE_SM501,
 };
 
@@ -1743,6 +1745,16 @@ void usb_ohci_init_pxa(target_phys_addr_t base, int num_ports, int devfn,
 
     usb_ohci_init(ohci, num_ports, devfn, irq,
                   OHCI_TYPE_PXA, "OHCI USB", 0);
+
+    cpu_register_physical_memory(base, 0x1000, ohci->mem);
+}
+
+void usb_ohci_init_omap(target_phys_addr_t base, uint32_t region_size,
+                       int num_ports, qemu_irq irq)
+{
+    OHCIState *ohci = (OHCIState *)qemu_mallocz(sizeof(OHCIState));
+
+    usb_ohci_init(ohci, num_ports, -1, irq, OHCI_TYPE_OMAP, "OHCI USB" ,0);
 
     cpu_register_physical_memory(base, 0x1000, ohci->mem);
 }
