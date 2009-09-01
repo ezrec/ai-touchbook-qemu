@@ -192,7 +192,11 @@ static int io_mem_watch;
 #endif
 
 /* log support */
+#ifdef WIN32
+static const char *logfilename = "qemu.log";
+#else
 static const char *logfilename = "/tmp/qemu.log";
+#endif
 FILE *logfile;
 int loglevel;
 static int log_append = 0;
@@ -2894,7 +2898,7 @@ static int get_free_io_mem_idx(void)
             io_mem_used[i] = 1;
             return i;
         }
-
+    fprintf(stderr, "RAN out out io_mem_idx, max %d !\n", IO_MEM_NB_ENTRIES);
     return -1;
 }
 
