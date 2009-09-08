@@ -852,7 +852,7 @@ static inline abi_long copy_to_user_timeval(abi_ulong target_tv_addr,
     return 0;
 }
 
-#if defined(TARGET_NR_mq_open) && defined(__NR_mq_open)
+#if defined(TARGET_NR_mq_open) && defined(CONFIG_MQ)
 #include <mqueue.h>
 
 static inline abi_long copy_from_user_mq_attr(struct mq_attr *attr,
@@ -6892,7 +6892,7 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
         break;
 #endif
 
-#if defined(TARGET_NR_mq_open) && defined(__NR_mq_open)
+#if defined(TARGET_NR_mq_open) && defined(CONFIG_MQ)
     case TARGET_NR_mq_open:
         {
             struct mq_attr posix_mq_attr;
