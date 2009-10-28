@@ -577,6 +577,8 @@ static void omap3_mmc_write(void *opaque, target_phys_addr_t addr,
                 omap3_mmc_transfer(s);
                 omap3_mmc_fifolevel_update(s);
             }
+            if (value == 0x0cc20001)
+            	    s->stat_pending &= ~2;
             omap3_mmc_interrupts_update(s);
             break;
         case 0x120:
