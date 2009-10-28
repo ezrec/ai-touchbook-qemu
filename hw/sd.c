@@ -255,7 +255,7 @@ static void sd_set_csd(SDState *sd, uint64_t size)
     uint32_t sectsize = (1 << (SECTOR_SHIFT + 1)) - 1;
     uint32_t wpsize = (1 << (WPGROUP_SHIFT + 1)) - 1;
 
-    if (size <= 0x80000000) {
+    if (size <= 0x40000000) {
 	    sd->csd[0] = 0x00;		/* CSD structure */
 	    sd->csd[1] = 0x26;		/* Data read access-time-1 */
 	    sd->csd[2] = 0x00;		/* Data read access-time-2 */
@@ -282,6 +282,8 @@ static void sd_set_csd(SDState *sd, uint64_t size)
 	    sd->csd[14] = 0x00;		/* File format group */
 	    sd->csd[15] = (sd_crc7(sd->csd, 15) << 1) | 1;
     } else {
+    	    size /= 512 * 1024;
+    	    size -= 1;
     	    sd->csd[0] = 0x40;
     	    sd->csd[1] = 0x0e;
     	    sd->csd[2] = 0x00;
@@ -289,9 +291,9 @@ static void sd_set_csd(SDState *sd, uint64_t size)
     	    sd->csd[4] = 0x5b;
     	    sd->csd[5] = 0x59;
     	    sd->csd[6] = 0x00;
-    	    sd->csd[7] = 0x00;
-    	    sd->csd[8] = 0x3b;
-    	    sd->csd[9] = 0xf7;
+    	    sd->csd[7] = (size >> 16) & 0xff;
+    	    sd->csd[8] = (size >> 8) & 0xff;
+    	    sd->csd[9] = (size & 0xff);
     	    sd->csd[10] = 0x7f;
     	    sd->csd[11] = 0x80;
     	    sd->csd[12] = 0x0a;
