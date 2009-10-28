@@ -527,8 +527,30 @@ static void twl4030_4a_write(TWL4030NodeState *s, uint8_t addr, uint8_t value)
         case 0x76 ... 0x84:
             /* read-only registers */
             break;
+        case 0x85: /* BCIMFKEY */
+            /* 0x57 = Enable BCIMFEN1 */
+            /* 0x73 = Enable BCIMFEN2 */
+            /* 0x9c = Enable BCIMFEN3 */
+            /* 0x3e = Enable BCIMFEN4 */
+            /* 0xd2 = Enable BCIMFTH1 */
+            /* 0x7f = Enable BCIMFTH2 */
+            /* 0x6d = Enable BCIMFTH3 */
+            /* 0xea = Enable BCIMFTH4 */
+            /* 0xc4 = Enable BCIMFTH5 */
+            /* 0xbc = Enable BCIMFTH6 */
+            /* 0xc3 = Enable BCIMFTH7 */
+            /* 0xf4 = Enable BCIMFTH8 */
+            /* 0xe7 = Enable BCIMFTH9, BCIVREF1, BCIVREF2, BCIIREF1, BCIIREF2 */
+            s->reg_data[addr] = value;
+	    break;
         case 0x97: /* BCICTL1 */
             s->reg_data[addr] = value;
+            break;
+        case 0x9b: /* BCIIREF1 */
+            s->reg_data[addr] = value;
+            break;
+        case 0x9c: /* BCIIREF2 */
+            s->reg_data[addr] = value & 3;
             break;
             
         /* PRECHARGE region */
@@ -550,6 +572,12 @@ static void twl4030_4a_write(TWL4030NodeState *s, uint8_t addr, uint8_t value)
             break;
         case 0xbc: /* BCIIMR2A */
             s->reg_data[addr] = value & 0x0f;
+            break;
+
+        case 0xc3: /* BCIEDR1 */
+        case 0xc4: /* BCIEDR2 */
+        case 0xc5: /* BCIEDR3 */
+            s->reg_data[addr] = value & 0xff;
             break;
 
         /* KEYPAD region */
@@ -715,6 +743,9 @@ static void twl4030_4b_write(TWL4030NodeState *s, uint8_t addr, uint8_t value)
         case 0x3b: /* CFG_BOOT */
             if (s->twl4030->key_cfg)
                 s->reg_data[addr] = (s->reg_data[addr] & 0x70) | (value & 0x8f);
+            break;
+        case 0x3d: /* BOOT_BCI */
+            s->reg_data[addr] = value & 0x17;
             break;
         case 0x44: /* PROTECT_KEY */
             s->twl4030->key_cfg = 0;
