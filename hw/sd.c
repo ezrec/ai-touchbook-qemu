@@ -81,7 +81,7 @@ struct SDState {
     uint32_t vhs;
     int wp_switch;
     int *wp_groups;
-    uint32_t size;
+    uint64_t size;
     int blk_len;
     uint32_t erase_start;
     uint32_t erase_end;
@@ -92,7 +92,7 @@ struct SDState {
     int spi;
     int current_cmd;
     int blk_written;
-    uint32_t data_start;
+    uint64_t data_start;
     uint32_t data_offset;
     uint8_t data[512];
     qemu_irq readonly_cb;
@@ -249,37 +249,57 @@ static const uint8_t sd_csd_rw_mask[16] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfc, 0xfe,
 };
 
-static void sd_set_csd(SDState *sd, uint32_t size)
+static void sd_set_csd(SDState *sd, uint64_t size)
 {
     uint32_t csize = (size >> (CMULT_SHIFT + HWBLOCK_SHIFT)) - 1;
     uint32_t sectsize = (1 << (SECTOR_SHIFT + 1)) - 1;
     uint32_t wpsize = (1 << (WPGROUP_SHIFT + 1)) - 1;
 
-    sd->csd[0] = 0x00;		/* CSD structure */
-    sd->csd[1] = 0x26;		/* Data read access-time-1 */
-    sd->csd[2] = 0x00;		/* Data read access-time-2 */
-    sd->csd[3] = 0x5a;		/* Max. data transfer rate */
-    sd->csd[4] = 0x5f;		/* Card Command Classes */
-    sd->csd[5] = 0x50 |		/* Max. read data block length */
-        HWBLOCK_SHIFT;
-    sd->csd[6] = 0xe0 |		/* Partial block for read allowed */
-        ((csize >> 10) & 0x03);
-    sd->csd[7] = 0x00 |		/* Device size */
-        ((csize >> 2) & 0xff);
-    sd->csd[8] = 0x3f |		/* Max. read current */
-        ((csize << 6) & 0xc0);
-    sd->csd[9] = 0xfc |		/* Max. write current */
-        ((CMULT_SHIFT - 2) >> 1);
-    sd->csd[10] = 0x40 |	/* Erase sector size */
-        (((CMULT_SHIFT - 2) << 7) & 0x80) | (sectsize >> 1);
-    sd->csd[11] = 0x00 |	/* Write protect group size */
-        ((sectsize << 7) & 0x80) | wpsize;
-    sd->csd[12] = 0x90 |	/* Write speed factor */
-        (HWBLOCK_SHIFT >> 2);
-    sd->csd[13] = 0x20 |	/* Max. write data block length */
-        ((HWBLOCK_SHIFT << 6) & 0xc0);
-    sd->csd[14] = 0x00;		/* File format group */
-    sd->csd[15] = (sd_crc7(sd->csd, 15) << 1) | 1;
+    if (size <= 0x80000000) {
+	    sd->csd[0] = 0x00;		/* CSD structure */
+	    sd->csd[1] = 0x26;		/* Data read access-time-1 */
+	    sd->csd[2] = 0x00;		/* Data read access-time-2 */
+	    sd->csd[3] = 0x5a;		/* Max. data transfer rate */
+	    sd->csd[4] = 0x5f;		/* Card Command Classes */
+	    sd->csd[5] = 0x50 |		/* Max. read data block length */
+		HWBLOCK_SHIFT;
+	    sd->csd[6] = 0xe0 |		/* Partial block for read allowed */
+		((csize >> 10) & 0x03);
+	    sd->csd[7] = 0x00 |		/* Device size */
+		((csize >> 2) & 0xff);
+	    sd->csd[8] = 0x3f |		/* Max. read current */
+		((csize << 6) & 0xc0);
+	    sd->csd[9] = 0xfc |		/* Max. write current */
+		((CMULT_SHIFT - 2) >> 1);
+	    sd->csd[10] = 0x40 |	/* Erase sector size */
+		(((CMULT_SHIFT - 2) << 7) & 0x80) | (sectsize >> 1);
+	    sd->csd[11] = 0x00 |	/* Write protect group size */
+		((sectsize << 7) & 0x80) | wpsize;
+	    sd->csd[12] = 0x90 |	/* Write speed factor */
+		(HWBLOCK_SHIFT >> 2);
+	    sd->csd[13] = 0x20 |	/* Max. write data block length */
+		((HWBLOCK_SHIFT << 6) & 0xc0);
+	    sd->csd[14] = 0x00;		/* File format group */
+	    sd->csd[15] = (sd_crc7(sd->csd, 15) << 1) | 1;
+    } else {
+    	    sd->csd[0] = 0x40;
+    	    sd->csd[1] = 0x0e;
+    	    sd->csd[2] = 0x00;
+    	    sd->csd[3] = 0x32;
+    	    sd->csd[4] = 0x5b;
+    	    sd->csd[5] = 0x59;
+    	    sd->csd[6] = 0x00;
+    	    sd->csd[7] = 0x00;
+    	    sd->csd[8] = 0x3b;
+    	    sd->csd[9] = 0xf7;
+    	    sd->csd[10] = 0x7f;
+    	    sd->csd[11] = 0x80;
+    	    sd->csd[12] = 0x0a;
+    	    sd->csd[13] = 0x40;
+    	    sd->csd[14] = 0x00;
+    	    sd->csd[15] = 0x00;
+    	    sd->ocr |= (1 << 30);
+    }
 }
 
 static void sd_set_rca(SDState *sd)
@@ -362,7 +382,7 @@ static void sd_response_r7_make(SDState *sd, uint8_t *response)
 
 static void sd_reset(SDState *sd, BlockDriverState *bdrv)
 {
-    uint32_t size;
+    uint64_t size;
     uint64_t sect;
 
     if (bdrv) {
@@ -372,10 +392,7 @@ static void sd_reset(SDState *sd, BlockDriverState *bdrv)
     }
     sect <<= 9;
 
-    if (sect > 0x40000000)
-        size = 0x40000000;	/* 1 gig */
-    else
-        size = sect + 1;
+    size = sect + 1;
 
     sect = (size >> (HWBLOCK_SHIFT + SECTOR_SHIFT + WPGROUP_SHIFT)) + 1;
 
@@ -445,7 +462,7 @@ static void sd_save_state(QEMUFile *f, void *opaque)
         qemu_put_sbe32(f, s->function_group[i]);
     qemu_put_sbe32(f, s->current_cmd);
     qemu_put_sbe32(f, s->blk_written);
-    qemu_put_be32(f, s->data_start);
+    qemu_put_be64(f, s->data_start);
     qemu_put_be32(f, s->data_offset);
     qemu_put_buffer(f, s->data, sizeof(s->data));
     qemu_put_buffer(f, s->buf, 512);
@@ -489,7 +506,7 @@ static int sd_load_state(QEMUFile *f, void *opaque, int version_id)
             s->function_group[i] = qemu_get_sbe32(f);
         s->current_cmd = qemu_get_sbe32(f);
         s->blk_written = qemu_get_sbe32(f);
-        s->data_start = qemu_get_be32(f);
+        s->data_start = qemu_get_be64(f);
         s->data_offset = qemu_get_be32(f);
         qemu_get_buffer(f, s->data, sizeof(s->data));
         qemu_get_buffer(f, s->buf, 512);
@@ -552,7 +569,7 @@ static void sd_erase(SDState *sd)
             sd->card_status |= WP_ERASE_SKIP;
 }
 
-static uint32_t sd_wpbits(SDState *sd, uint32_t addr)
+static uint32_t sd_wpbits(SDState *sd, uint64_t addr)
 {
     uint32_t i, wpnum;
     uint32_t ret = 0;
@@ -675,7 +692,14 @@ static sd_rsp_type_t sd_normal_command(SDState *sd,
                                        SDRequest req)
 {
     uint32_t rca = 0x0000;
+    uint64_t addr;
 
+    if (sd->ocr & (1 << 30)) {
+    	    addr = (uint64_t)req.arg << 9;
+    } else {
+    	    addr = req.arg;
+    }
+    
     if (sd_cmd_type[req.cmd] == sd_ac || sd_cmd_type[req.cmd] == sd_adtc)
         rca = req.arg >> 16;
 
@@ -831,7 +855,7 @@ static sd_rsp_type_t sd_normal_command(SDState *sd,
                 break;
             sd->state = sd_sendingdata_state;
             memcpy(sd->data, sd->csd, 16);
-            sd->data_start = req.arg;
+            sd->data_start = addr;
             sd->data_offset = 0;
             return sd_r1;
 
@@ -853,7 +877,7 @@ static sd_rsp_type_t sd_normal_command(SDState *sd,
                 break;
             sd->state = sd_sendingdata_state;
             memcpy(sd->data, sd->cid, 16);
-            sd->data_start = req.arg;
+            sd->data_start = addr;
             sd->data_offset = 0;
             return sd_r1;
 
@@ -946,7 +970,7 @@ static sd_rsp_type_t sd_normal_command(SDState *sd,
         switch (sd->state) {
         case sd_transfer_state:
             sd->state = sd_sendingdata_state;
-            sd->data_start = req.arg;
+            sd->data_start = addr;
             sd->data_offset = 0;
 
             if (sd->data_start + sd->blk_len > sd->size)
@@ -962,7 +986,7 @@ static sd_rsp_type_t sd_normal_command(SDState *sd,
         switch (sd->state) {
         case sd_transfer_state:
             sd->state = sd_sendingdata_state;
-            sd->data_start = req.arg;
+            sd->data_start = addr;
             sd->data_offset = 0;
 
             if (sd->data_start + sd->blk_len > sd->size)
@@ -984,7 +1008,7 @@ static sd_rsp_type_t sd_normal_command(SDState *sd,
             if (sd->spi)
                 break;
             sd->state = sd_receivingdata_state;
-            sd->data_start = req.arg;
+            sd->data_start = addr;
             sd->data_offset = 0;
             sd->blk_written = 0;
 
@@ -1010,7 +1034,7 @@ static sd_rsp_type_t sd_normal_command(SDState *sd,
             if (sd->spi)
                 break;
             sd->state = sd_receivingdata_state;
-            sd->data_start = req.arg;
+            sd->data_start = addr;
             sd->data_offset = 0;
             sd->blk_written = 0;
 
@@ -1061,13 +1085,13 @@ static sd_rsp_type_t sd_normal_command(SDState *sd,
     case 28:	/* CMD28:  SET_WRITE_PROT */
         switch (sd->state) {
         case sd_transfer_state:
-            if (req.arg >= sd->size) {
+            if (addr >= sd->size) {
                 sd->card_status = ADDRESS_ERROR;
                 return sd_r1b;
             }
 
             sd->state = sd_programming_state;
-            sd->wp_groups[req.arg >> (HWBLOCK_SHIFT +
+            sd->wp_groups[addr >> (HWBLOCK_SHIFT +
                             SECTOR_SHIFT + WPGROUP_SHIFT)] = 1;
             /* Bzzzzzzztt .... Operation complete.  */
             sd->state = sd_transfer_state;
@@ -1081,13 +1105,13 @@ static sd_rsp_type_t sd_normal_command(SDState *sd,
     case 29:	/* CMD29:  CLR_WRITE_PROT */
         switch (sd->state) {
         case sd_transfer_state:
-            if (req.arg >= sd->size) {
+            if (addr >= sd->size) {
                 sd->card_status = ADDRESS_ERROR;
                 return sd_r1b;
             }
 
             sd->state = sd_programming_state;
-            sd->wp_groups[req.arg >> (HWBLOCK_SHIFT +
+            sd->wp_groups[addr >> (HWBLOCK_SHIFT +
                             SECTOR_SHIFT + WPGROUP_SHIFT)] = 0;
             /* Bzzzzzzztt .... Operation complete.  */
             sd->state = sd_transfer_state;
@@ -1103,7 +1127,7 @@ static sd_rsp_type_t sd_normal_command(SDState *sd,
         case sd_transfer_state:
             sd->state = sd_sendingdata_state;
             *(uint32_t *) sd->data = sd_wpbits(sd, req.arg);
-            sd->data_start = req.arg;
+            sd->data_start = addr;
             sd->data_offset = 0;
             return sd_r1b;
 
@@ -1418,11 +1442,11 @@ int sd_do_command(SDState *sd, SDRequest *req,
     return rsplen;
 }
 
-/* No real need for 64 bit addresses here */
-static void sd_blk_read(SDState *sd, uint32_t addr, uint32_t len)
+static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
 {
-    uint32_t end = addr + len;
+    uint64_t end = addr + len;
 
+    DPRINTF("sd_blk_read: addr = 0x%08llx, len = %d\n", (unsigned long long)addr, len);
     if (!sd->bdrv || bdrv_read(sd->bdrv, addr >> 9, sd->buf, 1) == -1) {
         fprintf(stderr, "sd_blk_read: read error on host side\n");
         return;
@@ -1440,9 +1464,9 @@ static void sd_blk_read(SDState *sd, uint32_t addr, uint32_t len)
         memcpy(sd->data, sd->buf + (addr & 511), len);
 }
 
-static void sd_blk_write(SDState *sd, uint32_t addr, uint32_t len)
+static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
 {
-    uint32_t end = addr + len;
+    uint64_t end = addr + len;
 
     if ((addr & 511) || len < 512)
         if (!sd->bdrv || bdrv_read(sd->bdrv, addr >> 9, sd->buf, 1) == -1) {
@@ -1601,6 +1625,7 @@ uint8_t sd_read_data(SDState *sd)
 {
     /* TODO: Append CRCs */
     uint8_t ret;
+    int io_len;
 
     if (!sd->bdrv || !bdrv_is_inserted(sd->bdrv) || !sd->enable)
         return 0x00;
@@ -1612,6 +1637,12 @@ uint8_t sd_read_data(SDState *sd)
 
     if (sd->card_status & (ADDRESS_ERROR | WP_VIOLATION))
         return 0x00;
+
+    if (sd->ocr & (1 << 30)) {
+	io_len = 512;
+    } else {
+    	io_len = sd->blk_len;
+    }
 
     switch (sd->current_cmd) {
     case 6:	/* CMD6:   SWITCH_FUNCTION */
@@ -1631,13 +1662,13 @@ uint8_t sd_read_data(SDState *sd)
 
     case 11:	/* CMD11:  READ_DAT_UNTIL_STOP */
         if (sd->data_offset == 0)
-            BLK_READ_BLOCK(sd->data_start, sd->blk_len);
+            BLK_READ_BLOCK(sd->data_start, io_len);
         ret = sd->data[sd->data_offset ++];
 
-        if (sd->data_offset >= sd->blk_len) {
-            sd->data_start += sd->blk_len;
+        if (sd->data_offset >= io_len) {
+            sd->data_start += io_len;
             sd->data_offset = 0;
-            if (sd->data_start + sd->blk_len > sd->size) {
+            if (sd->data_start + io_len > sd->size) {
                 sd->card_status |= ADDRESS_ERROR;
                 break;
             }
@@ -1653,22 +1684,22 @@ uint8_t sd_read_data(SDState *sd)
 
     case 17:	/* CMD17:  READ_SINGLE_BLOCK */
         if (sd->data_offset == 0)
-            BLK_READ_BLOCK(sd->data_start, sd->blk_len);
+            BLK_READ_BLOCK(sd->data_start, io_len);
         ret = sd->data[sd->data_offset ++];
 
-        if (sd->data_offset >= sd->blk_len)
+        if (sd->data_offset >= io_len)
             sd->state = sd_transfer_state;
         break;
 
     case 18:	/* CMD18:  READ_MULTIPLE_BLOCK */
         if (sd->data_offset == 0)
-            BLK_READ_BLOCK(sd->data_start, sd->blk_len);
+            BLK_READ_BLOCK(sd->data_start, io_len);
         ret = sd->data[sd->data_offset ++];
 
-        if (sd->data_offset >= sd->blk_len) {
-            sd->data_start += sd->blk_len;
+        if (sd->data_offset >= io_len) {
+            sd->data_start += io_len;
             sd->data_offset = 0;
-            if (sd->data_start + sd->blk_len > sd->size) {
+            if (sd->data_start + io_len > sd->size) {
                 sd->card_status |= ADDRESS_ERROR;
                 break;
             }
