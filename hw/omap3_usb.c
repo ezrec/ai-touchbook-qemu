@@ -425,8 +425,10 @@ static void omap3_hsusb_tll_write(void *opaque, target_phys_addr_t addr,
         case 0x00: /* USBTLL_REVISION */
         case 0x14: /* USBTLL_SYSSTATUS */
             OMAP_RO_REGV(addr, value);
+            break;
         case 0x10: /* USBTLL_SYSCONFIG */
             s->tll_sysconfig = value & 0xFFFFFEE0;;
+            break;
         default:
             OMAP_BAD_REGV(addr, value);
             break;
@@ -461,9 +463,9 @@ static void omap3_hsusb_host_init(struct omap_target_agent_s *host_ta,
     omap_l4_attach(host_ta, 0, l4_register_io_memory(omap3_hsusb_host_readfn,
                                                      omap3_hsusb_host_writefn,
                                                      s));
-/*    omap_l4_attach(host_ta, 1, usb_ohci_init_omap(omap_l4_base(host_ta, 1),
+    omap_l4_attach(host_ta, 1, usb_ohci_init_omap(omap_l4_base(host_ta, 1),
                                                   omap_l4_size(host_ta, 1),
-                                                  3, ohci_irq));*/
+                                                  3, ohci_irq));
     omap_l4_attach(host_ta, 2, l4_register_io_memory(omap3_hsusb_ehci_readfn,
                                                      omap3_hsusb_ehci_writefn,
                                                      s));

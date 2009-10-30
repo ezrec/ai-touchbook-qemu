@@ -1046,7 +1046,7 @@ struct omap3_hsusb_s *omap3_hsusb_init(struct omap_target_agent_s *otg_ta,
                                        qemu_irq tll_irq);
 
 /* usb-ohci.c */
-void usb_ohci_init_omap(target_phys_addr_t base, uint32_t region_size,
+int usb_ohci_init_omap(target_phys_addr_t base, uint32_t region_size,
                        int num_ports, qemu_irq irq);
 
 
