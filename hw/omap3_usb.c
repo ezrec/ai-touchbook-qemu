@@ -354,45 +354,6 @@ static CPUWriteMemoryFunc * const omap3_hsusb_host_writefn[] = {
     omap3_hsusb_host_write,
 };
 
-static uint32_t omap3_hsusb_ehci_read(void *opaque, target_phys_addr_t addr)
-{
-    struct omap3_hsusb_host_s *s = (struct omap3_hsusb_host_s *)opaque;
-    TRACE(OMAP_FMT_plx, addr);
-    switch (addr) {
-        case 0xa4: /* INSNREG05_ULPI */
-            return s->insnreg05_ulpi;
-        default:
-            break;
-    }
-    return 0;
-}
-
-static void omap3_hsusb_ehci_write(void *opaque, target_phys_addr_t addr,
-                                   uint32_t value)
-{
-    struct omap3_hsusb_host_s *s = (struct omap3_hsusb_host_s *)opaque;
-    TRACE(OMAP_FMT_plx " = 0x%08x", addr, value);
-
-    switch (addr) {
-        case 0xa4: /* INSNREG05_ULPI */
-            s->insnreg05_ulpi = value & 0xF0000000;
-        default:
-            break;
-     }
-}
-
-static CPUReadMemoryFunc * const omap3_hsusb_ehci_readfn[] = {
-    omap_badwidth_read32,
-    omap_badwidth_read32,
-    omap3_hsusb_ehci_read,
-};
-
-static CPUWriteMemoryFunc * const omap3_hsusb_ehci_writefn[] = {
-    omap_badwidth_write32,
-    omap_badwidth_write32,
-    omap3_hsusb_ehci_write,
-};
-
 static uint32_t omap3_hsusb_tll_read(void *opaque, target_phys_addr_t addr)
 {
     struct omap3_hsusb_host_s *s = (struct omap3_hsusb_host_s *)opaque;
@@ -466,9 +427,9 @@ static void omap3_hsusb_host_init(struct omap_target_agent_s *host_ta,
     omap_l4_attach(host_ta, 1, usb_ohci_init_omap(omap_l4_base(host_ta, 1),
                                                   omap_l4_size(host_ta, 1),
                                                   3, ohci_irq));
-    omap_l4_attach(host_ta, 2, l4_register_io_memory(omap3_hsusb_ehci_readfn,
-                                                     omap3_hsusb_ehci_writefn,
-                                                     s));
+    omap_l4_attach(host_ta, 2, usb_ehci_init_omap(omap_l4_base(host_ta, 1),
+                                                  omap_l4_size(host_ta, 1),
+                                                  3, ehci_irq));
     
     omap3_hsusb_host_reset(s);
     

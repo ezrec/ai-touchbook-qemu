@@ -1386,8 +1386,11 @@ static void pc_init1(ram_addr_t ram_size,
 
     cmos_init(below_4g_mem_size, above_4g_mem_size, boot_device, hd);
 
+    //  TODO the piix3 does not have EHCI - looks like ICH4
+    //  was first southbridge to support it.
     if (pci_enabled && usb_enabled) {
-        usb_uhci_piix3_init(pci_bus, piix3_devfn + 2);
+        usb_uhci_piix3_init(pci_bus, piix3_devfn + 3);
+        usb_ehci_init_pci(pci_bus, piix3_devfn + 2);
     }
 
     if (pci_enabled && acpi_enabled) {
@@ -1395,7 +1398,7 @@ static void pc_init1(ram_addr_t ram_size,
         i2c_bus *smbus;
 
         /* TODO: Populate SPD eeprom data.  */
-        smbus = piix4_pm_init(pci_bus, piix3_devfn + 3, 0xb100,
+        smbus = piix4_pm_init(pci_bus, piix3_devfn + 4, 0xb100,
                               isa_reserve_irq(9));
         for (i = 0; i < 8; i++) {
             DeviceState *eeprom;

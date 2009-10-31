@@ -1049,6 +1049,10 @@ struct omap3_hsusb_s *omap3_hsusb_init(struct omap_target_agent_s *otg_ta,
 int usb_ohci_init_omap(target_phys_addr_t base, uint32_t region_size,
                        int num_ports, qemu_irq irq);
 
+/* usb-ehci.c */
+int usb_ehci_init_omap(target_phys_addr_t base, uint32_t region_size,
+                       int num_ports, qemu_irq irq);
+
 
 # define cpu_is_omap310(cpu)		(cpu->mpu_model == omap310)
 # define cpu_is_omap1510(cpu)		(cpu->mpu_model == omap1510)

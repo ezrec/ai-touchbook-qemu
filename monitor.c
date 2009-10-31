@@ -1849,6 +1849,8 @@ static const mon_cmd_t info_cmds[] = {
       "", "show guest USB devices", },
     { "usbhost", "", usb_host_info,
       "", "show host USB devices", },
+    { "usbehci", "", usb_ehci_info,
+      "", "show ehci status", },
     { "profile", "", do_info_profile,
       "", "show profiling information", },
     { "capture", "", do_info_capture,
